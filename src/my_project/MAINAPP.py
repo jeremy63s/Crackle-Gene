@@ -274,7 +274,7 @@ def sequence_picker(label: str, key_prefix: str, session_key: str):
 
 # ---------- Tabs ----------
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-   ["Upload sequences", "View mutations", "Blast results", "Export", "Debug"]
+   ["Upload sequences", "Mutations", "Blast results", "View/export", "Debug"]
 )
 
 
