@@ -75,3 +75,24 @@ data/processed/
 # === Secrets / env vars ===
 .env
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.DS_Store
+
+# Virtual environments (never commit these)
+.venv/
+.venv_fresh/
+venv/
+
+# Big artifacts you probably don't want in Git
+/data/
+outputs/
+results/
+*.npy
+*.npz
+*.pt
+*.h5
