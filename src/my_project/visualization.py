@@ -1,82 +1,36 @@
 import numpy as np
 import tqdm
 import matplotlib.pyplot as plt
-import tkinter as tk
-from tkinter import scrolledtext
-root = tk.Tk()
+#import tkinter as tk
+#from tkinter import scrolledtext
+#root = tk.Tk()
+# src/my_project/visualization.py
+# Streamlit-safe plotting (no tkinter, no plt.show)
+import numpy as np
+import matplotlib.pyplot as plt
+
 def plot_interactive_matrix(num_chunks, matches, match_map, threshold):
     """
-    Build and display an interactive square grid (num_chunks x num_chunks) for above-threshold matches.
-    The color scale is relative (from threshold to 1) so differences above threshold are visible.
-    A loading bar is shown while building the matrix.
-    Clicking on a cell (with a match) opens a Tkinter window with a scrollable text widget showing:
-      - The aligned reference and evolved sequences (with connecting midline if applicable)
-      - The code to access the corresponding chunk matrix (e.g., "chunk_matrices[<match_index>]")
+    Build a simple heatmap of normalized scores.
+    - No tkinter
+    - No plt.show()
+    - Returns a Matplotlib Figure (call st.pyplot(fig) in Streamlit)
     """
-    # Build the score matrix only for above-threshold matches.
-    # Build the score matrix only for above-threshold matches, with a progress bar
-    score_matrix = np.zeros((num_chunks, num_chunks))
-    for match in tqdm.tqdm(matches,
-                      total=len(matches),
-                      desc="Building interactive matrix",
-                      unit="match",
-                      leave=False):
-        i = match['evo_index'] - 1
-        j = match['ref_index'] - 1
-        score_matrix[i, j] = match['normalized_score']
+    # initialize with NaNs so "missing" cells render light/white
+    mat = np.full((num_chunks, num_chunks), np.nan, dtype=float)
+    for m in matches:
+        i = int(m["evo_index"]) - 1
+        j = int(m["ref_index"]) - 1
+        # normalized_score expected in [0,1]
+        mat[i, j] = float(m.get("normalized_score", np.nan))
 
-    # Create a colormap scaled from threshold to 1.
-    fig, ax = plt.subplots(figsize=(8, 8))
-    im = ax.imshow(score_matrix, cmap='viridis', interpolation='nearest', origin='upper', vmin=threshold, vmax=1)
-    ax.set_title("Normalized Alignment Score Matrix (Matches Only)")
-    ax.set_xlabel("Reference Chunk Index")
-    ax.set_ylabel("Evolved Chunk Index")
-    ax.set_xticks(np.arange(num_chunks))
-    ax.set_yticks(np.arange(num_chunks))
-    ax.set_xticklabels([str(x + 1) for x in range(num_chunks)])
-    ax.set_yticklabels([str(x + 1) for x in range(num_chunks)])
-    plt.colorbar(im, ax=ax, label="Normalized Score")
-
-    def on_click(event):
-        if event.xdata is None or event.ydata is None:
-            return
-        col = int(round(event.xdata))
-        row = int(round(event.ydata))
-        if row < 0 or row >= num_chunks or col < 0 or col >= num_chunks:
-            return
-        key = (row + 1, col + 1)  # 1-indexed keys
-        if key in match_map:
-            match = match_map[key]
-
-            # Create a new Toplevel window
-            win = tk.Toplevel(root)
-            win.title(f"Chunk Match: Evolved {key[0]} vs. Reference {key[1]}")
-
-            # Create a horizontally scrollable text widget
-            st = scrolledtext.ScrolledText(
-                win,
-                wrap="none",  # no wrapping => horizontal scrolling
-                width=100,
-                height=10,
-                font=("Courier", 12)
-            )
-            st.pack(expand=True, fill="both")
-
-            # Build exactly three lines: reference, midline, evolved
-            lines = [
-                match["aligned_ref"],
-                match["midline"],
-                match["aligned_evo"],
-                "",  # blank line
-                f"Access code: chunk_matrices[{match['match_index']}]"
-            ]
-            st.insert("1.0", "\n".join(lines))
-        else:
-            print(f"No match found for cell (Evolved {row + 1}, Reference {col + 1})")
-
-    fig.canvas.mpl_connect('button_press_event', on_click)
-    plt.show()
-    return score_matrix
+    fig, ax = plt.subplots(figsize=(10, 6))
+    im = ax.imshow(mat, origin="lower", aspect="auto", vmin=0.0, vmax=1.0)
+    ax.set_xlabel("Reference chunk")
+    ax.set_ylabel("Evolved chunk")
+    ax.set_title(f"Match matrix (threshold ≥ {threshold:.2f})")
+    cbar = fig.colorbar(im, ax=ax, label="Normalized score")
+    return fig
 
 def print_alignment_summary(match, snippet_length=100):
     """Print a summary of a matching pair."""

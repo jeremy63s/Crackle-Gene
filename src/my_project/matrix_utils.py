@@ -16,13 +16,13 @@ def compute_indices(aligned_seq, offset, begin):
     return indices
 
 
-def compute_indicator(aligned_evo, aligned_ref):
+def compute_indicator(aligned_evo, aligned_ref, *, as_numpy=False):
     """
     For each aligned column, compute an indicator:
       1 if both non-gap and identical,
      -1 if both non-gap but different,
       0 if either is a gap.
-    Returns two identical lists.
+    Returns two identical sequences (evolved_indicator, reference_indicator).
     """
     indicator = []
     for a, r in zip(aligned_evo, aligned_ref):
@@ -30,7 +30,13 @@ def compute_indicator(aligned_evo, aligned_ref):
             indicator.append(1 if a == r else -1)
         else:
             indicator.append(0)
-    return indicator, indicator
+
+    if as_numpy:
+        arr = np.asarray(indicator, dtype=int)
+        return arr.copy(), arr.copy()
+    else:
+        return indicator[:], indicator[:]   # distinct copies
+
 
 
 def build_chunk_matrix(match):
@@ -54,7 +60,22 @@ def build_chunk_matrix(match):
     row4 = list(aligned_evo)
     row5 = compute_indices(aligned_evo, match["evo_offset"], match["begin_query"])
     ind_evo, ind_ref = compute_indicator(aligned_evo, aligned_ref)
-    row6 = ind_evo
+
+    # --- frameshift counter row (row6) ---
+    frame_counter = []
+    current = 0
+    for evo_base, ref_base in zip(row4, row2):
+        evo_is_gap = evo_base == '-' or not str(evo_base).upper() in {"A", "C", "G", "T"}
+        ref_is_gap = ref_base == '-' or not str(ref_base).upper() in {"A", "C", "G", "T"}
+        if ref_is_gap and not evo_is_gap:
+            # insertion relative to reference → evolved has extra base
+            current -= 1
+        elif evo_is_gap and not ref_is_gap:
+            # deletion relative to reference → reference has extra base
+            current += 1
+        frame_counter.append(current)
+
+    row6 = frame_counter
     row7 = ind_ref
     chunk_matrix = np.array([row1, row2, row3, row4, row5, row6, row7], dtype=object)
     return chunk_matrix
@@ -71,6 +92,6 @@ def build_final_matrix(chunk_matrices):
     total_cols = concatenated.shape[1]
     counter_row = np.arange(1, total_cols +  1).reshape(1, -1)
     final_matrix = np.vstack([concatenated, counter_row])
-    print("concatenated shape is", concatenated.shape)
-    print("counter_row shape is", counter_row.shape)
+    #print("concatenated shape is", concatenated.shape)
+    #print("counter_row shape is", counter_row.shape)
     return final_matrix

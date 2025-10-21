@@ -8,6 +8,39 @@ import parasail
 from sequence_utils import substitution_matrix
 from tqdm import tqdm            # ← add this!
 from typing import Tuple, List
+# alignment.py
+from typing import Callable, Optional, Any, Dict, List, Tuple
+
+ProgressPairCB = Optional[Callable[[int, int], None]]  # k, total
+
+def compare_sections(
+    evo_sections: List[Tuple[str, int]],
+    ref_sections: List[Tuple[str, int]],
+    threshold: float,
+    rotated_evolved: str,
+    rotated_ref: str,
+    progress_cb: ProgressPairCB = None,   # <-- NEW
+) -> List[Dict[str, Any]]:
+    matches: List[Dict[str, Any]] = []
+
+    total = max(1, len(evo_sections) * len(ref_sections))
+    k = 0
+
+    # If you already use tqdm here, keep it. Just ALSO call progress_cb per step.
+    for i, (evo_sec, evo_off) in enumerate(evo_sections, start=1):
+        for j, (ref_sec, ref_off) in enumerate(ref_sections, start=1):
+            # --- your existing per-pair logic ---
+            # Example (adjust to your real code):
+            # aligned_evo, aligned_ref, midline, align_score, bq, eq, br, er = get_alignment(evo_sec, ref_sec)
+            # norm_score = compute_norm_score(...)
+            # if norm_score >= threshold: matches.append({...})
+
+            # --- tick progress every pair ---
+            k += 1
+            if progress_cb:
+                progress_cb(k, total)
+
+    return matches
 
 def extract_extended_context(full_sequence, section_offset, alignment_start, alignment_end, extension=200):
     """
@@ -49,29 +82,41 @@ def get_alignment(evolved, reference):
             begin_query, trace_result.end_query,
             begin_ref, trace_result.end_ref)
 
-def diagonal_check(evolved_sections, reference_sections, threshold):
+def diagonal_check(
+    evolved_sections,
+    reference_sections,
+    threshold,
+    progress_cb: Optional[Callable[[int, int], None]] = None,  # <-- NEW
+):
     """
     Fast check: compare section i vs section i for all i,
     returns (pct_met, max_consec_failed, raw_scores, norm_scores).
+    Emits progress via progress_cb(i, total) if provided.
     """
-    n = len(evolved_sections)
-    raw_scores = []
-    norm_scores = []
+    n = min(len(evolved_sections), len(reference_sections))
+    total = max(1, n)
 
-    for (evo_sec, _), (ref_sec, _) in tqdm(
-            zip(evolved_sections, reference_sections),
-            total=n,
-            desc="Diagonal check",
-            leave=False
-        ):
+    raw_scores: List[float] = []
+    norm_scores: List[float] = []
+
+    # tqdm in terminal + enumerate so we know the step index
+    for i, ((evo_sec, _), (ref_sec, _)) in enumerate(
+        tqdm(zip(evolved_sections, reference_sections),
+             total=n, desc="Diagonal check", leave=False),
+        start=1
+    ):
         # compute once and store both raw and normalized
         raw = parasail.sw_stats(evo_sec, ref_sec, 1, 1, substitution_matrix).score
         raw_scores.append(raw)
-        norm_scores.append(raw / len(evo_sec))
+        norm_scores.append(raw / max(1, len(evo_sec)))
+
+        # 🔑 tell Streamlit
+        if progress_cb:
+            progress_cb(i, total)
 
     # compute percent met
     meets = [s >= threshold for s in norm_scores]
-    pct_met = sum(meets) / n * 100
+    pct_met = (sum(meets) / total) * 100.0
 
     # compute longest consecutive failures
     max_run = 0
@@ -84,6 +129,7 @@ def diagonal_check(evolved_sections, reference_sections, threshold):
             run = 0
 
     return pct_met, max_run, raw_scores, norm_scores
+
 
 def compare_sections(evolved_sections, reference_sections, threshold, full_evolved, full_reference):
     """

@@ -1,6 +1,7 @@
-biopython==1.83
-parasail==1.3.4
-numpy==1.26.0
-matplotlib==3.7.5
-tqdm==4.67.1
-orfipy==0.0.4
+streamlit==1.38.0
+matplotlib==3.9.2
+numpy==2.1.3
+biopython==1.85
+tqdm==4.66.4
+orfipy==0.10.0
+parasail==1.3.5

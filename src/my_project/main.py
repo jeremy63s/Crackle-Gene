@@ -1,6 +1,8 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import microservices as ms
+import builtins, traceback, streamlit as st
 import subprocess
 import sys
 import platform
@@ -9,6 +11,8 @@ import orfipy.findorfs as of
 import orfipy_core
 from Bio.Seq import Seq
 import parasail
+
+from my_project.MAINAPP import do_blast
 from sequence_utils import substitution_matrix
 from tqdm import tqdm            # ← add this!
 from typing import Tuple, List
@@ -27,23 +31,22 @@ from sequence_utils import on_pick, CODON_TABLE, translate_nuc_row_active, rever
 from sequence_utils import array_to_str, parse_orf_frame,  process_orf_array
 
 def main():
-    print("Welcome to the Genome Sequence Comparator!")
+    ref = st.session_state.get("ref_seq", "") or ""
+    evo = st.session_state.get("evolved_seq", "") or ""
+    start = st.session_state.get("start_subseq", "") or ""
     # Get sequences.
-    ref_seq = get_sequence("reference")
-    evolved_seq = get_sequence("evolved")
-    start_subseq = get_sequence("starting subsequence")
+    ref_seq = ms.get_sequence(ref)
+    evolved_seq = ms.get_sequence(evo)
+    start_subseq = ms.get_sequence(start)
 
     # Rotate sequences.
     try:
         rotated_ref = rotate_sequence(ref_seq, start_subseq)
         rotated_evolved = rotate_sequence(evolved_seq, start_subseq)
     except ValueError as e:
-        print("\nError during rotation:", e)
+
         return None
-    print("\nRotated Reference Sequence:")
-    print(rotated_ref)
-    print("\nRotated Evolved Sequence:")
-    print(rotated_evolved)
+
 
     # Divide sequences.
     try:
@@ -51,29 +54,26 @@ def main():
         if n <= 0:
             raise ValueError("Number of sections must be positive.")
     except ValueError as e:
-        print("Invalid input for number of sections:", e)
+
         return None
     ref_sections = divide_sequence_with_offset(rotated_ref, n)
     evolved_sections = divide_sequence_with_offset(rotated_evolved, n)
-    print("\nReference Sequence Sections (with offsets):")
-    for idx, (sec, offset) in enumerate(ref_sections, start=1):
-        print(f"Section {idx} (offset {offset}): {sec}")
-    print("\nEvolved Sequence Sections (with offsets):")
-    for idx, (sec, offset) in enumerate(evolved_sections, start=1):
-        print(f"Section {idx} (offset {offset}): {sec}")
+
+
+
 
     # Ask for a normalized alignment score threshold.
 #    try:
 #        threshold = float(input("\nEnter the normalized alignment score threshold (0 to 1, e.g., 0.9): ").strip())
 #    except ValueError as e:
-#        print("Invalid threshold:", e)
+#
 #        return None
 
         # Ask for a normalized alignment score threshold.
     try:
         threshold = float(input("\nEnter the normalized alignment score threshold (0 to 1, e.g., 0.9): ").strip())
     except ValueError as e:
-        print("Invalid threshold:", e)
+
         return None
 
     # ----- NEW: diagonal pre-check -----
@@ -84,11 +84,9 @@ def main():
         evolved_sections, ref_sections, threshold
     )
 
-    print(f"\nDiagonal check:")
-    print(f"  {pct_met:.1f}% of chunks on the diagonal met the alignment threshold")
-    print(f"  Longest run of consecutive failures on diagonal: {max_consec_fail} chunks")
-    if max_consec_fail > 2 and pct_met < 90:
-        print("  Recommend running full analysis to check for translocations")
+
+
+
 
     run_full = input("\nRun full n×n comparison? (Y/N): ").strip().upper()
     do_full = (run_full == 'Y')
@@ -139,7 +137,7 @@ def main():
                 "match_index": len(matches),
             }
             matches.append(match)
-    #print("aligned_evo length is: ", len(aligned_evo), "aligned ref length is: ", len(aligned_ref))
+
     # 4) Build chunk_matrices and match_map as before
     chunk_matrices = [
         build_chunk_matrix(m)
@@ -149,7 +147,7 @@ def main():
 
     # 5) Interactive matrix (this will just show the diagonal if do_full is False)
     num_chunks = len(evolved_sections)
-    print("\nBuilding interactive matrix visualization...")
+
     interactive_matrix = plot_interactive_matrix(
         num_chunks, matches, match_map, threshold
     )
@@ -160,35 +158,34 @@ def main():
     # chunk_file_path = "/Users/benumlauf/PycharmProjects/GENOMEANALYSIS/chunk_matrices.npy"
     # np.save(chunk_file_path, chunk_matrices)
     # if os.path.exists(chunk_file_path):
-    #    print("Chunk matrices saved successfully at:", chunk_file_path)
+
     # else:
-    #    print("Error: Chunk matrices file was not saved.")
+
 
     # Save Final Matrix to .npy file.
     #final_matrix_path = "/Users/benumlauf/PycharmProjects/GENOMEANALYSIS/final_matrix.npy"
     #np.save(final_matrix_path, final_matrix)
     #if os.path.exists(final_matrix_path):
-    #    print("Final matrix saved successfully at:", final_matrix_path)
+
     #else:
-    #    print("Error: Final matrix file was not saved.")
+
 
     # Also, save the final matrix as a text file (optional).
     # final_matrix_txt_path = "/Users/benumlauf/PycharmProjects/GENOMEANALYSIS/final_matrix.txt"
     # np.savetxt(final_matrix_txt_path, final_matrix, fmt='%s', delimiter='\t')
     # if os.path.exists(final_matrix_txt_path):
-    #    print("Final matrix text file saved successfully at:", final_matrix_txt_path)
+
     # else:
-    #    print("Error: Final matrix text file was not saved.")
+
     #final_matrix = results["final_matrix"]
-    #print(type(final_matrix), final_matrix.shape)
+
     final_matrix = np.array(final_matrix)
-    print("final_matrix is a", type(final_matrix))
-    print("final_matrix is shape", final_matrix.shape)
+
 
     # 1) Diagnose
 
     # if isinstance(final_matrix, dict):
-    #   print(" keys:", final_matrix.keys())
+
 
     # 2) Convert to 2D array
     # if isinstance(final_matrix, dict):
@@ -198,18 +195,16 @@ def main():
     #    data = np.array(final_matrix)
 
     # 3) Confirm
-    # print("data.shape =", getattr(data, "shape", None))
+
     data = np.array(final_matrix)
-    print("data is shape", data.shape)
-    print("data is type", type(data))
+
     # 4) Find indices in 7th row (index 6)
 
     indices = np.where(data[6] == -1)[0]
-    # print("–1’s at columns:", indices)
+
     # where are the indels and point mutations
-    print("Indices where the value is -1:")
-    for idx in indices:
-        print(f"Index: {idx}, Value: {data[5, idx]}")
+
+
 
     # MAKING GRAPH
 
@@ -273,7 +268,7 @@ def main():
     #   Row 12: Reverse complement of the evolved sequence
     #   Row 13: Amino acid translation for the reverse complement of the evolved (active coding regions only)
 
-    print(final_matrix[:, 3])
+
     # Now final_matrix has six additional rows at the bottom.
     # Initialize an empty list for storing the desired elements.
 
@@ -289,7 +284,7 @@ def main():
     # Optionally, convert ForwardAAMuts to a NumPy array
     ForwardAAMuts = np.array(ForwardAAMuts)
 
-    print(ForwardAAMuts)
+
 
     aa_order = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
     aa_to_num = {aa: i + 1 for i, aa in enumerate(aa_order)}
@@ -333,13 +328,13 @@ def main():
     ##########################
 
     loaded_matrix = final_matrix
-    # print(loaded_matrix[:, 66120])
+
 
     from Bio import SeqIO
 
     fasta_file = '/Users/benumlauf/Desktop/Reference_Sequence.fa'
 
-    # Parse the FASTA file and print each record's ID and sequence.
+
 
     # REPLACE ALL - WITH N
 
@@ -358,12 +353,7 @@ def main():
     N_matrix[12, :] = np.where(N_matrix[12, :] == '-', 'N', N_matrix[12, :])
 
     # Now, N_matrix has the modifications, and all other elements remain unchanged.
-    # print(N_matrix[:, 66120])
 
-    # Parse the FASTA file and print each record's ID and sequence.
-    # for record in SeqIO.parse(fasta_file, "fasta"):
-    #    print("ID:", record.id)
-    #    print("Sequence:", record.seq)
 
     #np.save("/Users/benumlauf/Downloads/final_matrix14.npy", loaded_matrix)
 
@@ -387,10 +377,7 @@ def main():
             # Translate the ORF sequence
             aa_seq = orf_seq.translate(to_stop=True)
 
-            print(f"Detected ORF ({feature.type}) at positions {start} to {end} (strand {strand})")
-            print("First 10 amino acids:", aa_seq[:10])
-            print("Full translation (up to stop):", aa_seq)
-            print("-" * 60)
+
     seq_indices = {
         "forward_ref": 1,
         "forward_evolved": 3,
@@ -450,12 +437,9 @@ def main():
     # --- Output the Annotation Arrays as Strings ---
     # There will be 12 arrays total (4 sequences × 3 reading frames).
     for seq_name, frames in results.items():
-        print(f"Annotations for sequence: {seq_name}")
+
         for frame in range(3):
             ann_str = "".join(frames[frame])
-            print(f"  Reading Frame {frame} (ORF frame {frame + 1}):")
-            print(ann_str)
-            print("-" * 60)
 
     # --- Create a 12x(seq_length) Matrix for Protein Annotations ---
     # Define the order in which sequences should be added.
@@ -470,14 +454,13 @@ def main():
 
     # Convert the list of rows into a NumPy array.
     protein_matrix = np.array(protein_matrix_rows)
-    print("Protein Matrix Shape:", protein_matrix.shape)
-    print('N matrix shape:', N_matrix.shape)
+
     # The protein_matrix now has 12 rows and each row has the same number of columns as the sequence length.
 
     # Append protein_matrix to the bottom of N_matrix
     # Ensure that both matrices have the same number of columns
     info_matrix = np.vstack((N_matrix, protein_matrix))
-    print("information matrix shape:", info_matrix.shape)
+
     # --- right after info_matrix is ready in main() ---
     a_map = {
         1: 14,
@@ -539,7 +522,7 @@ def main():
                                        ['25), Reverse complement evolved ORF frame 3']])
 
 
-    #global_path_info = '/Users/benumlauf/Desktop/JS/pyfolder/info_matrix.npy'
+    #global_path_info = '/Users/siegelmanfamily/Desktop/JS/pyproject/info_matrix.npy'
     #np.save(global_path_info, info_matrix)
 
     # SAVE MATRIX CHEATSHEET
@@ -573,7 +556,7 @@ def main():
     try:
         info_matrix
     except NameError:
-        print("Error: info_matrix is not defined. Please pre-define it before running this script.")
+
         return
 
     #all_results = []
@@ -585,34 +568,38 @@ def main():
 
     for row_code, left, right in all_results:
         seq = extract_protein_seq(info_matrix, a_map[row_code], left, right)
-        print("Protein:", seq)
 
-    result_matrix_path = "/Users/siegelmanfamily/Desktop/JS/pyproject"
+
+    result_matrix_path = "/Users/siegelmanfamily/Desktop/JS/pyproject/result_matrix"
 #chatgpt told me to do this######
     # --- after you build all_results ---
     if all_results:
         result_matrix = np.array(all_results)
         np.save(result_matrix_path, result_matrix)
-        print("mutated ORFs successfully saved at", result_matrix_path)
+
     else:
-        print("No boundaries computed for any ORF.")
+
         result_matrix = np.empty((0, 3), dtype=int)
 
-    process_result_matrix(info_matrix, result_matrix, do_blast=False)
+    #process_result_matrix(info_matrix, result_matrix, do_blast=bool(do_blast))
+    process_result_matrix(info_matrix, result_matrix, do_blast=True)
+
     #return { … }
 
 #    if all_results:
 #        result_matrix = np.array(all_results)
-#        print("\nUnique boundaries matrix (columns: ORF_code, left boundary, right boundary):")
-#        print(result_matrix)
+#
 #        result_matrix_path = '/Users/siegelmanfamily/Desktop/JS/pyproject'
 #        np.save(result_matrix_path, result_matrix)
-#        print("mutated ORFs successfully saved at", result_matrix_path)
-#    else:
-#        print("No boundaries computed for any ORF.")
+#
+#
+#
+
+    # AFTER
+    #process_result_matrix(info_matrix, result_matrix, do_blast=bool(do_blast))
+    process_result_matrix(info_matrix, result_matrix, do_blast=True)
 
 
-    process_result_matrix(info_matrix, result_matrix, do_blast=False)
     return {
         "matches": matches,
         "chunk_matrices": chunk_matrices,
@@ -642,9 +629,9 @@ if __name__ =="__main__":
     # e.g. (<class 'numpy.ndarray'>, (8, 178))
 #actgatcggggctagcttagcgattagcgtactgactatacacgagccacactctctcttttgaggggaagcgatggattgcgatcgcgcagtcgatgcagggggacgatatctatagcggcgatgctgattctgatgcttagtgctagctgcgcggatggctatagcgcgtaatttaggcgaaagcgcgcgcgcgctagc
 
-#/Users/siegelmanfamily/Downloads/contig_1_Genome_R0_FLIPPED_Red_FASTA.fa
+# /Users/siegelmanfamily/Downloads/contig_1_Genome_R0_FLIPPED_Red_FASTA.fa
 #/Users/siegelmanfamily/Downloads/contig_1_R75_Genome_FASTA.fa
-
+#/Users/siegelmanfamily/Desktop/JS/genome_stuff/Sf_e293f_R52_genome_FASTA.fa
 #/Users/siegelmanfamily/Downloads/contig_1_Genome_R0_FASTA.fa
 
 # RNA polymerase subunit alpha:

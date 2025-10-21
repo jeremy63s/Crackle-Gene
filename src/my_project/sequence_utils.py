@@ -1,6 +1,6 @@
 import parasail
 import string
-import tkinter as tk
+#import tkinter as tk
 ALPHABET = string.ascii_uppercase
 substitution_matrix = parasail.matrix_create(ALPHABET, 1, -1)
 scatter = None
@@ -141,17 +141,17 @@ def on_pick(event):
     subset_str = "\n".join(row_lines) + "\n"
 
     # Use the existing Tk root if available; otherwise create one.
-    root = tk._default_root
-    if root is None:
-        root = tk.Tk()
+    #root = tk._default_root
+   #if root is None:
+       # root = tk.Tk()
 
     # Create a new window for the text display.
-    win = tk.Toplevel(root)
+   # win = tk.Toplevel(root)
     win.title(f"Data Matrix Slice (Columns {start_idx} to {end_idx-1})")
 
     # Create a ScrolledText widget with no wrapping and a larger monospaced font.
     text_widget = scrolledtext.ScrolledText(win, wrap='none', font=("Courier", 14))
-    text_widget.insert(tk.END, subset_str)
+   # text_widget.insert(tk.END, subset_str)
     text_widget.configure(state='normal')  # Enable editing temporarily for tagging.
 
     # Highlight rows 2, 5, and 6 (if they exist in the subset) using yellow.

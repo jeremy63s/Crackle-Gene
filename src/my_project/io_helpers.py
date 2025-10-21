@@ -1,7 +1,7 @@
-import matplotlib
+#import matplotlib
 
-matplotlib.use('TkAgg')  # Force TkAgg backend
-from Bio.Blast import NCBIWWW, NCBIXML
+#matplotlib.use('TkAgg')  # Force TkAgg backend
+#from Bio.Blast import NCBIWWW, NCBIXML
 
 import parasail
 import string
@@ -65,3 +65,4 @@ def get_sequence(seq_type):
     else:
         seq = input(f"Enter the {seq_type} sequence: ").strip()
     return seq.upper()
+
