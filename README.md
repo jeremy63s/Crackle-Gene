@@ -2,10 +2,21 @@
 
 A Genome Sequence Comparator with Parasail, Biopython, ORFipy, and a Streamlit UI.
 
-## Setup
 
+## Quickstart (macOS/Linux)
 ```bash
-cd crackle_gene
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/jeremy63s/Crackle-Gene.git
+cd Crackle-Gene-main
+bash scripts/setup_and_run.sh
+
+## Powershell
+git clone https://github.com/jeremy63s/Crackle-Gene.git
+cd Crackle-Gene-main
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\setup_and_run.ps1
+
+
+## Docker
+docker build -t crackle-gene .
+docker run --rm -p 8501:8501 crackle-gene
+# Visit http://localhost:8501
