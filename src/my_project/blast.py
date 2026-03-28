@@ -10,7 +10,7 @@ def extract_protein_seq(info_matrix, a, b, c):
     # take every 3rd position, starting at 0
     AA_seq = AA_triplocate[0::3]
     # join into a string
-    return ''.join(AA_seq)
+    return ''.join(ch for ch in AA_seq if ch not in ('-', 'X'))
 
 
 

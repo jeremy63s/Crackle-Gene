@@ -157,3 +157,42 @@ def default_n_sections(seq_len: int) -> int:
 
 def anomalous_rows(feature_df) -> "pd.DataFrame":
     return feature_df[feature_df["label"] != 1]
+
+
+# ms for tab 2 of MAINAPP
+def highlighted_block(a: str, b: str, a_label="REF", b_label="EVO", start_pos: int = 0) -> str:
+    import html
+    la = "".join(
+        f"<span class='{'mm' if (i < len(b) and ch != b[i]) else 'ok'}'>{html.escape(ch)}</span>"
+        for i, ch in enumerate(a)
+    )
+    lb = "".join(
+        f"<span class='{'mm' if (i < len(a) and ch != a[i]) else 'ok'}'>{html.escape(ch)}</span>"
+        for i, ch in enumerate(b)
+    )
+    lab_a = f"{a_label} {start_pos:>7d}: "
+    lab_b = f"{b_label} {start_pos:>7d}: "
+    return (
+        "<div class='seqwrap'>"
+        f"<div class='rowline'><span class='lab'>{lab_a}</span><span class='diffblock'>{la}</span></div>"
+        f"<div class='rowline'><span class='lab'>{lab_b}</span><span class='diffblock'>{lb}</span></div>"
+        "</div>"
+    )
+
+def diff_indices(code: int, start: int, end: int, info_matrix) -> list:
+    r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
+    ref = info_matrix[r_row, start:end]
+    evo = info_matrix[e_row, start:end]
+    return [start + i for i, (a, b) in enumerate(zip(ref, evo)) if a != b]
+
+def mut_type_from_frameshift(i: int, fs_row) -> str:
+    try:
+        curr = int(fs_row[i])
+        prev = int(fs_row[i - 1]) if i > 0 else curr
+        delta = curr - prev
+    except Exception:
+        return "point"
+    if delta == 0:   return "point"
+    if delta == -1:  return "insertion"
+    if delta == 1:   return "deletion"
+    return f"delta={delta}"

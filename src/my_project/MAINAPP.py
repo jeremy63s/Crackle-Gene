@@ -9,7 +9,7 @@ import pandas as pd
 
 import threading, queue, time
 os.environ.setdefault("MPLBACKEND", "Agg")  # force headless BEFORE pyplot
-import builtins, traceback, streamlit as st
+import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Tuple, List
@@ -21,13 +21,7 @@ from my_project.visualization import plot_interactive_matrix
 # Your heavy deps (make sure they are installed in your venv)
 import parasail
 import string
-_real_import = builtins.__import__
-def _no_tk_import(name, *args, **kwargs):
-   if name in ("tkinter", "_tkinter", "Tkinter", "matplotlib.backends.backend_tkagg"):
-       st.error("❌ Tk/TkAgg import attempted! Here’s the stack:\n\n" + "".join(traceback.format_stack()))
-       raise RuntimeError("Tk/TkAgg import attempted (see Streamlit error for stack).")
-   return _real_import(name, *args, **kwargs)
-builtins.__import__ = _no_tk_import
+
 # ---------------------------------------------------------------
 
 
@@ -44,67 +38,7 @@ import matplotlib.pyplot as plt
 st.caption(f"Matplotlib backend: {matplotlib.get_backend()}")
 
 
-# BASH:
 
-
-## === Launch Genome Comparator Streamlit app ===
-
-
-
-
-#################################################
-
-
-# cat > ~/run_genome_app.sh <<'SH'
-# cd /Users/siegelmanfamily/Downloads/crackle_gene
-# source .venv/bin/activate
-# export PYTHONPATH="$PWD/src"
-# export MPLBACKEND=Agg
-# export QT_QPA_PLATFORM=offscreen
-# python -m streamlit run src/my_project/MAINAPP.py
-# SH
-# chmod +x ~/run_genome_app.sh
-#
-# ~/run_genome_app.sh
-
-
-
-
-# cd /Users/siegelmanfamily/Downloads/crackle_gene
-# source .venv/bin/activate
-
-
-# python -m streamlit run src/my_project/MAINAPP.py
-
-
-# export PYTHONPATH="$PWD/src"
-
-
-
-
-
-
-# cd /Users/siegelmanfamily/Downloads/crackle_gene/src
-# streamlit run my_project/MAINAPP.py
-
-
-# source venv/bin/activate
-# streamlit run src/my_project/MAINAPP.py
-
-
-
-
-
-
-# AVOID COCOA ABORT IF NEEDED: # --- SAFE BACKEND FOR STREAMLIT ON MAC ---
-# import os
-# os.environ["MPLBACKEND"] = "Agg"
-#
-# import matplotlib
-# matplotlib.use("Agg", force=True)
-# import matplotlib.pyplot as plt
-# # -----------------------------------------
-#from __future__ import annotations
 
 
 import re
@@ -488,13 +422,10 @@ with tab1:
 with tab2:
    st.header("Results")
 
-
-   # ----- fetch results -----
    res = st.session_state.get("results")
    if not res:
        st.info("Run the alignment first to see results.")
        st.stop()
-
 
    rm = res.get("result_matrix")
    info_matrix = res.get("info_matrix")
@@ -502,18 +433,12 @@ with tab2:
        st.warning("No ORF boundaries computed yet.")
        st.stop()
 
-
-   # ----- dataframe + selection state -----
    import pandas as pd
    df = pd.DataFrame(rm, columns=["code", "start", "end"]).astype(int)
-   selected_idx = st.session_state.get("selected_result_row")
-
 
    st.session_state.setdefault("blast_logs", [])
    log_placeholder = None
 
-
-   # ----- styles & helper (define BEFORE use) -----
    st.markdown("""
    <style>
    .seqwrap { width:100%; max-width:100%; overflow-x:auto; overflow-y:hidden;
@@ -534,141 +459,53 @@ with tab2:
    </style>
    """, unsafe_allow_html=True)
 
+   def _select_row(i: int):
+       st.session_state["selected_result_row"] = i
 
-   def _highlighted_block(a: str, b: str, a_label="REF", b_label="EVO", start_pos: int = 0) -> str:
-       la = "".join(
-           f"<span class='{'mm' if (i < len(b) and ch != b[i]) else 'ok'}'>{ch}</span>"
-           for i, ch in enumerate(a)
-       )
-       lb = "".join(
-           f"<span class='{'mm' if (i < len(a) and ch != a[i]) else 'ok'}'>{ch}</span>"
-           for i, ch in enumerate(b)
-       )
-       lab_a = f"{a_label} {start_pos:>7d}: "
-       lab_b = f"{b_label} {start_pos:>7d}: "
-       return (
-           "<div class='seqwrap'>"
-           f"<div class='rowline'><span class='lab'>{lab_a}</span><span class='diffblock'>{la}</span></div>"
-           f"<div class='rowline'><span class='lab'>{lab_b}</span><span class='diffblock'>{lb}</span></div>"
-           "</div>"
-           #"<div class='legend'>Highlighted = mismatch</div>"
-       )
-
-
-   # ===== TOP: comparison box & controls =====
-   # ===== TOP: comparison box & controls =====
    top_left, top_right = st.columns([1, 1])
    with top_right:
        mode = st.radio("View mode", ["DNA sequence", "Amino acid sequence"],
                        index=0, horizontal=True, key="view_mode_tab2")
 
-
    details_container = st.container()
-
-
-
-
-   # --- helpers used by comparison + details ---
-   def _diff_indices(code: int, start: int, end: int, info_matrix) -> list[int]:
-       # DNA rows depend on orientation from ORF code
-       r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
-       ref = info_matrix[r_row, start:end]
-       evo = info_matrix[e_row, start:end]
-       # Return GLOBAL nucleotide indices that differ
-       return [start + i for i, (a, b) in enumerate(zip(ref, evo)) if a != b]
-
-
-
-
-   def _mut_type_from_frameshift(i: int, fs_row) -> str:
-       # frameshift counter is row 5
-       try:
-           curr = int(fs_row[i])
-           prev = int(fs_row[i - 1]) if i > 0 else curr
-           delta = curr - prev
-       except Exception:
-           return "point"
-       if delta == 0:   return "point"
-       if delta == -1:  return "insertion"
-       if delta == 1:   return "deletion"
-       return f"delta={delta}"
-
-
-
-
-   def _select_row(i: int):
-       st.session_state["selected_result_row"] = i
-
-
-
 
    st.subheader("Select mutated ORFs to view")
 
-
-   # keep a per-row checked state in session
-   if "mut_checks" not in st.session_state:
-       st.session_state["mut_checks"] = {i: False for i in range(len(df))}
-   else:
-       # sync size
-       for i in range(len(df)):
-           st.session_state["mut_checks"].setdefault(i, False)
-       for k in list(st.session_state["mut_checks"].keys()):
-           if k >= len(df):
-               st.session_state["mut_checks"].pop(k, None)
-
-
-   # --- Select-all ---
-   current_all = all(st.session_state["mut_checks"].get(i, False) for i in range(len(df)))
-   select_all = st.checkbox("Select all", value=current_all, key="mut_select_all")
-   if select_all != current_all:
-       for i in range(len(df)):
-           st.session_state["mut_checks"][i] = select_all
-           st.session_state[f"mut_ck_{i}"] = select_all  # keep widget state in sync
-
-    
-    
-
    fs_row = info_matrix[5, :]
 
-   # Render rows: [checkbox] [View] [label]
+   # --- multiselect replacing checkboxes ---
+   mutation_options = []
    for idx, (code, start, end) in enumerate(df.itertuples(index=False, name=None)):
        try:
-           diffs = _diff_indices(int(code), int(start), int(end), info_matrix)
+           diffs = ms.diff_indices(int(code), int(start), int(end), info_matrix)
        except Exception:
            diffs = []
+       types = [ms.mut_type_from_frameshift(int(gi), fs_row) for gi in range(int(start), int(end))]
+       non_point = [t for t in types if t != "point"]
+       mut_type = max(set(non_point), key=non_point.count) if non_point else "point"
+       length = int(end - start)
+       label = f"Mutation {idx + 1} — code {code}, start {start}, end {end}, length {length}, diffs {len(diffs)}, type {mut_type}"
+       mutation_options.append(label)
 
+   selected_labels = st.multiselect(
+       "Select mutations",
+       options=mutation_options,
+       default=[],
+       key="mut_multiselect",
+   )
+   selected_rows = [mutation_options.index(l) for l in selected_labels]
 
-       c1, c2, c3 = st.columns([0.08, 0.15, 0.77])
+   # view buttons — one per selected mutation
+   for idx in selected_rows:
+       st.button(f"View mutation {idx + 1}", key=f"rm_row_btn_{idx}",
+                 on_click=_select_row, args=(idx,))
 
-
-       widget_key = f"mut_ck_{idx}"
-       with c1:
-           checked = st.checkbox("", key=widget_key)
-           st.session_state["mut_checks"][idx] = checked
-
-
-       with c2:
-           st.button("View", key=f"rm_row_btn_{idx}",
-                     on_click=_select_row, args=(idx,))
-
-
-       with c3:
-        length = int(end - start)
-        types = [_mut_type_from_frameshift(int(gi), fs_row) for gi in range(int(start), int(end))]
-        non_point = [t for t in types if t != "point"]
-        mut_type = max(set(non_point), key=non_point.count) if non_point else "point"
-        st.markdown(
-            f"**Mutation {idx + 1}** — code `{code}`, start `{start}`, end `{end}`, length `{length}` "
-            f"(nt diffs: **{len(diffs)}**), type: '{mut_type}'"
-        )
-
+   # keep mut_checks in sync for tab 3/4 compatibility
+   st.session_state["mut_checks"] = {i: (i in selected_rows) for i in range(len(df))}
 
    st.markdown("---")
-   selected_rows = [i for i, v in st.session_state["mut_checks"].items() if v]
    st.caption(f"{len(selected_rows)} mutation(s) selected")
 
-
-   # placeholder submit button (no action yet)
    submit_pressed = st.button("Submit to BLAST", key="blast_submit", type="primary")
    log_container = st.container()
    with log_container:
@@ -684,7 +521,6 @@ with tab2:
        else:
            log_placeholder = None
 
-
    if submit_pressed:
        if not selected_rows:
            st.warning("Select at least one mutation before submitting to BLAST.")
@@ -692,9 +528,7 @@ with tab2:
            subset_rows = df.iloc[selected_rows][["code", "start", "end"]].astype(int)
            subset_matrix = subset_rows.to_numpy()
 
-
            log_buffer: list[str] = []
-
 
            def _record_log(msg: str) -> None:
                log_buffer.append(msg)
@@ -702,11 +536,9 @@ with tab2:
                if log_placeholder is not None:
                    log_placeholder.code("\n".join(st.session_state["blast_logs"]), language="text")
 
-
            st.session_state["blast_logs"] = []
            if log_placeholder is not None:
                log_placeholder.code("Submitting requests to NCBI BLAST…", language="text")
-
 
            with st.spinner("Submitting selected sequences to NCBI BLAST…"):
                try:
@@ -722,8 +554,6 @@ with tab2:
                        log_placeholder.code(f"Error: {exc}", language="text")
                else:
                    st.session_state["blast_queue"] = subset_rows.apply(tuple, axis=1).tolist()
-
-
                    existing = dict(res.get("blast_names") or {})
                    for local_idx, global_idx in enumerate(selected_rows):
                        name = blast_results.get(local_idx)
@@ -731,8 +561,6 @@ with tab2:
                            existing[global_idx] = name
                        else:
                            existing.setdefault(global_idx, "No BLAST hits found.")
-
-
                    res["blast_names"] = existing
                    st.session_state["results"]["blast_names"] = existing
                    hit_count = sum(1 for name in blast_results.values() if name)
@@ -747,7 +575,6 @@ with tab2:
                        else:
                            log_placeholder.code("BLAST completed.", language="text")
 
-
    with details_container:
        selected_idx = st.session_state.get("selected_result_row")
        if selected_idx is not None:
@@ -756,7 +583,6 @@ with tab2:
            except Exception:
                code = start = end = None
 
-
            if code is not None:
                if mode == "DNA sequence":
                    r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
@@ -764,8 +590,8 @@ with tab2:
                    evo_slice = "".join(info_matrix[e_row, start:end].tolist())
                    st.subheader("DNA comparison")
                    st.markdown(
-                       _highlighted_block(ref_slice, evo_slice,
-                                          a_label="REF (DNA)", b_label="EVO (DNA)", start_pos=start),
+                       ms.highlighted_block(ref_slice, evo_slice,
+                                            a_label="REF (DNA)", b_label="EVO (DNA)", start_pos=start),
                        unsafe_allow_html=True
                    )
                else:
@@ -775,22 +601,19 @@ with tab2:
                    evo_slice = "".join(info_matrix[e_row, start:end:3].tolist())
                    st.subheader("Amino acid comparison")
                    st.markdown(
-                       _highlighted_block(ref_slice, evo_slice,
-                                          a_label="REF (AA)", b_label="EVO (AA)", start_pos=start),
+                       ms.highlighted_block(ref_slice, evo_slice,
+                                            a_label="REF (AA)", b_label="EVO (AA)", start_pos=start),
                        unsafe_allow_html=True
                    )
-
 
                st.markdown("---")
                st.subheader(f"Mutation {selected_idx + 1} details")
 
-
-               diffs_nt = _diff_indices(code, start, end, info_matrix)
+               diffs_nt = ms.diff_indices(code, start, end, info_matrix)
                fs_row = info_matrix[5, :]
                dna_r, dna_e = (1, 3) if code in (1, 2, 3) else (10, 12)
                aa_map = {1: (14, 17), 2: (15, 18), 3: (16, 19), 4: (20, 23), 5: (21, 24), 6: (22, 25)}
                aa_r, aa_e = aa_map.get(code, (14, 17))
-
 
                nt_detail = []
                for gi in diffs_nt:
@@ -808,12 +631,10 @@ with tab2:
                        "nucleotide index": int(gi),
                        "ref→evo (nt)": f"{ref_base} → {evo_base}",
                        "ref→evo (aa)": f"{ref_aa} → {evo_aa}",
-                       "mutation type": _mut_type_from_frameshift(int(gi), fs_row),
+                       "mutation type": ms.mut_type_from_frameshift(int(gi), fs_row),
                    })
 
-
                if nt_detail:
-                   import pandas as pd
                    st.dataframe(
                        pd.DataFrame(nt_detail)
                          .sort_values("nucleotide index")
@@ -823,7 +644,6 @@ with tab2:
                    )
                else:
                    st.info("No nucleotide mismatches detected within this span.")
-
 
                st.markdown("---")
                st.write("**Protein annotation (from BLAST):** ")
@@ -839,8 +659,7 @@ with tab2:
                else:
                    st.info("Submit to BLAST to see protein results.")
        else:
-           st.info("Click a row below to view the aligned region.")
-
+           st.info("Select a mutation above and click View to see details.")
 
 with tab4:
    st.header("BLAST Results")
