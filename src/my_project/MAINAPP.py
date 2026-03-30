@@ -65,20 +65,20 @@ from my_project.blast import process_result_matrix
 
 
 INFO_MATRIX_CHEATSHEET = [
-   (0, "Alignment data (chunkwise)"),
-   (1, "Reference nucleotide sequence"),
-   (2, "Reference nucleotide index"),
-   (3, "Evolved nucleotide sequence"),
-   (4, "Evolved nucleotide index"),
-   (5, "Frameshift counter (del:+1, ins:-1)"),
-   (6, "Mutation type (in/del:0, point:-1)"),
-   (7, "Global index"),
-   (8, "Amino acids in ref (naive ORF def)"),
-   (9, "Amino acids in evo (naive ORF def)"),
+   (0,  "Alignment data (chunkwise)"),
+   (1,  "Reference nucleotide sequence"),
+   (2,  "Reference nucleotide index"),
+   (3,  "Evolved nucleotide sequence"),
+   (4,  "Evolved nucleotide index"),
+   (5,  "Frameshift counter (del:+1, ins:-1)"),
+   (6,  "Mutation type (in/del:0, point:-1)"),
+   (7,  "Global index"),
+   (8,  "Reference active ORF tracker"),
+   (9,  "Evolved active ORF tracker"),
    (10, "RevComp of reference seq"),
-   (11, "AA in RevComp ref (naive ORF)"),
+   (11, "RevComp reference active ORF tracker"),
    (12, "RevComp of evolved seq"),
-   (13, "AA in RevComp evolved (naive ORF)"),
+   (13, "RevComp evolved active ORF tracker"),
    (14, "Reference ORF frame 1"),
    (15, "Reference ORF frame 2"),
    (16, "Reference ORF frame 3"),
@@ -182,12 +182,14 @@ def sequence_picker(label: str, key_prefix: str, session_key: str):
 
 
 # ---------- Tabs ----------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-   ["Upload sequences", "Mutations", "View", "Blast results", "Debug"]
+page = st.sidebar.radio(
+    "Navigation",
+    ["Upload sequences", "Submit to blast", "View", "BLAST results", "Debug"],
+    key="nav_page",
 )
 
 
-with tab1:
+if page == "Upload sequences":
    st.header("Upload / Paste Sequences")
    st.caption(f"BLAST flag = {bool(st.session_state.get('do_blast', False))}")
    st.caption(f"run_pipeline from {run_pipeline.__module__}")  # should show 'pypeline'
@@ -232,7 +234,7 @@ with tab1:
                               help="If on, pipeline will annotate protein names.")
        st.session_state["do_blast"] = bool(do_blast)
    st.session_state["use_isolation_forest"] = bool(use_isolation_forest)
-   with tab1:
+   if page == "Upload sequences":
        # ... your inputs ...
        run_alignment_button = st.button("Run Alignment", key="run_alignment_btn", type="primary")
        if run_alignment_button:
@@ -259,10 +261,10 @@ with tab1:
 
 
            # === UI progress bars (one per phase) ===
-           prog_diag = st.progress(0, text="Diagonal check…")  # <-- NEW
-           prog_compare = st.progress(0, text="Comparing chunks…")
-           prog_matrices = st.progress(0, text="Building matrices…")
-
+           prog_diag    = st.empty()
+           prog_compare = st.empty()
+           prog_matrices = st.empty()
+           prog_prodigal = st.empty()
 
            import threading, queue, time
 
@@ -322,38 +324,47 @@ with tab1:
 
                kind = item[0]
                if kind == "progress":
-                   _, phase, i, total = item
-                   total = max(int(total), 1)
-                   frac = min(max(int(i), 0) / total, 1.0)
-                   if phase == "diagonal":  # <-- NEW
-                       prog_diag.progress(frac, text=f"Diagonal check: {i}/{total}")
-                   elif phase == "compare":
-
-
-
-
-
-
-                       prog_compare.progress(frac, text=f"Comparing chunks: {i}/{total}")
-                   elif phase == "matrices":
-                       prog_matrices.progress(frac, text=f"Building matrices: {i}/{total}")
-               elif kind == "log":
+                  _, phase, i, total = item
+                  total = max(int(total), 1)
+                  frac = min(max(int(i), 0) / total, 1.0)
+                  if phase == "diagonal":
+                      prog_compare.empty()
+                      prog_matrices.empty()
+                      prog_prodigal.empty()
+                      prog_diag.progress(frac, text=f"Diagonal check: {i}/{total}")
+                  elif phase == "compare":
+                    prog_diag.empty()
+                    prog_matrices.empty()
+                    prog_prodigal.empty()
+                    prog_compare.progress(frac, text=f"Comparing chunks: {i}/{total}")
+                  elif phase == "matrices":
+                    prog_diag.empty()
+                    prog_compare.empty()
+                    prog_prodigal.empty()
+                    prog_matrices.progress(frac, text=f"Building matrices: {i}/{total}")
+                  elif phase == "prodigal":
+                    prog_diag.empty()
+                    prog_compare.empty()
+                    prog_matrices.empty()
+                    prog_prodigal.progress(frac, text=f"Prodigal ORF prediction: {i}/4 sequences")
+                  elif kind == "log":
                    _, msg = item
                    with log_area.container():
                        st.write(msg)
-               elif kind == "error":
+                  elif kind == "error":
                    _, err = item
                    prog_diag.empty();
                    prog_compare.empty();
                    prog_matrices.empty()
                    st.exception(err);
                    st.stop()
-               elif kind == "done":
+                  elif kind == "done":
                    break
                time.sleep(0.01)
            prog_diag.empty()
            prog_compare.empty();
            prog_matrices.empty()
+           prog_prodigal.empty()
 
 
            results = _result.get("val")
@@ -419,7 +430,7 @@ with tab1:
            st.warning("No ORF boundaries computed.")
 
 
-with tab2:
+if page == "Submit to blast":
    st.header("Results")
 
    res = st.session_state.get("results")
@@ -476,11 +487,18 @@ with tab2:
    # --- multiselect replacing checkboxes ---
    mutation_options = []
    for idx, (code, start, end) in enumerate(df.itertuples(index=False, name=None)):
+       is_revcomp = int(code) in (4, 5, 6)
        try:
            diffs = ms.diff_indices(int(code), int(start), int(end), info_matrix)
        except Exception:
            diffs = []
-       types = [ms.mut_type_from_frameshift(int(gi), fs_row) for gi in range(int(start), int(end))]
+       
+
+        # in the mutation options loop
+       types = [ms.mut_type_from_frameshift(int(gi), fs_row, revcomp=is_revcomp) 
+               for gi in range(int(start), int(end))]
+
+       
        non_point = [t for t in types if t != "point"]
        mut_type = max(set(non_point), key=non_point.count) if non_point else "point"
        length = int(end - start)
@@ -616,6 +634,7 @@ with tab2:
                aa_r, aa_e = aa_map.get(code, (14, 17))
 
                nt_detail = []
+               is_revcomp = int(code) in (4, 5, 6)
                for gi in diffs_nt:
                    try:
                        ref_base = str(info_matrix[dna_r, gi])
@@ -661,7 +680,7 @@ with tab2:
        else:
            st.info("Select a mutation above and click View to see details.")
 
-with tab4:
+if page == "BLAST results":
    st.header("BLAST Results")
    res = st.session_state.get("results")
    blast_names = {}
@@ -683,7 +702,7 @@ with tab4:
            )
 
 
-with tab3:
+if page == "View":
    st.header("Selected mutations summary")
    res = st.session_state.get("results")
    if not res:
@@ -753,11 +772,30 @@ with tab3:
                        color: #111;
                        margin-bottom: 10px;
                     }
-                   .seqwrap.pdf {
-                       border-color: rgba(0, 0, 0, 0.25);
-                       background: #fafafa;
-                       padding: 14px 16px;
+                   .seqwrap { 
+                        width:100%; 
+                        max-width:100%; 
+                        overflow-x:auto; 
+                        overflow-y:hidden;
+                        border:1px solid rgba(0,0,0,0.08); 
+                        padding:12px 14px; 
+                        border-radius:10px; 
+                        background:#fff;
+                        display:block;
                     }
+                    .rowline { 
+                        white-space:nowrap; 
+                        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+                        font-size:14px; 
+                        line-height:1.7;
+                        color:#111;
+                        display:block;
+                        width:max-content;
+                    }
+                    .lab { color:#666; margin-right:12px; display:inline-block; min-width:160px; }
+                    .diffblock { display:inline; color:#111; }
+                    .ok { color:#111; }
+                    .mm { background:#ffd24d; color:#000 !important; border-radius:2px; }
                    .seqwrap.pdf .pdf-pair {
                        margin-bottom: 14px;
                     }
@@ -925,8 +963,23 @@ with tab3:
                        st.divider()
 
 
-with tab5:
+if page == "Debug":
     st.header("Debug")
+    st.markdown("""
+    <style>
+    .seqwrap { 
+        width:100%; max-width:100%; overflow-x:auto; overflow-y:hidden;
+        border:1px solid rgba(0,0,0,0.08); padding:12px 14px; border-radius:10px; 
+        background:#fff; display:block;
+    }
+    .rowline { 
+        white-space:nowrap; 
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size:14px; line-height:1.7; color:#111; display:block; width:max-content;
+    }
+    .diffblock { display:inline; color:#111; }
+    </style>
+    """, unsafe_allow_html=True)
     res = st.session_state.get("results")
     if not res:
         st.info("Run the alignment in Tab 1 to populate debug data.")

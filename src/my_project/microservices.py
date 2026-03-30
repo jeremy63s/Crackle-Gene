@@ -2,6 +2,10 @@
 from __future__ import annotations
 import re
 from typing import Dict, Tuple
+# for prodigal
+import subprocess
+import tempfile
+import os
 
 # IUPAC DNA (includes RNA U) + gap '-'
 _AMBIG = set("ACGTURYSWKMBDHVN-")
@@ -185,8 +189,11 @@ def diff_indices(code: int, start: int, end: int, info_matrix) -> list:
     evo = info_matrix[e_row, start:end]
     return [start + i for i, (a, b) in enumerate(zip(ref, evo)) if a != b]
 
-def mut_type_from_frameshift(i: int, fs_row) -> str:
+def mut_type_from_frameshift(i: int, fs_row, revcomp: bool = False) -> str:
     try:
+        seq_len = len(fs_row)
+        if revcomp:
+            i = seq_len - 1 - i
         curr = int(fs_row[i])
         prev = int(fs_row[i - 1]) if i > 0 else curr
         delta = curr - prev
@@ -196,3 +203,123 @@ def mut_type_from_frameshift(i: int, fs_row) -> str:
     if delta == -1:  return "insertion"
     if delta == 1:   return "deletion"
     return f"delta={delta}"
+
+    # for active ORF tracker and prodigal implementation
+def frame_active(value: int, frame: int) -> bool:
+    """Check if a given frame (1,2,3) is active in the encoded value."""
+    return str(frame) in str(value)
+
+
+
+
+def run_prodigal(seq: str, seq_name: str = "seq") -> list[dict]:
+    """
+    Run Prodigal on a clean (no gaps) sequence string.
+    Returns list of dicts with keys: start, stop, strand, frame
+    Only returns forward strand ORFs — caller handles strand separately.
+    """
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.fa', delete=False) as f:
+        f.write(f">{seq_name}\n{seq}\n")
+        fasta_path = f.name
+
+    gff_path = fasta_path + ".gff"
+
+    try:
+        subprocess.run(
+            ["prodigal", "-i", fasta_path, "-f", "gff", "-o", gff_path,
+             "-p", "meta", "-q"],
+            check=True,
+            capture_output=True,
+        )
+        orfs = []
+        with open(gff_path) as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.strip().split("\t")
+                if len(parts) < 9 or parts[2] != "CDS":
+                    continue
+                start  = int(parts[3]) - 1  # GFF is 1-based → 0-based
+                stop   = int(parts[4])
+                strand = parts[6]
+                frame  = (start % 3) + 1    # 1, 2, or 3
+                orfs.append({
+                    "start":  start,
+                    "stop":   stop,
+                    "strand": strand,
+                    "frame":  frame,
+                })
+        return orfs
+    finally:
+        os.unlink(fasta_path)
+        if os.path.exists(gff_path):
+            os.unlink(gff_path)
+
+
+def build_active_orf_tracker(
+    seq: str,
+    pos_map: list[int],
+    seq_len: int,
+    orfs: list[dict],
+) -> list[int]:
+    """
+    Build an active ORF tracker row of length seq_len (original coordinate space).
+
+    Encoding at each position:
+        0         = no active ORF
+        1/2/3     = one active ORF in that reading frame
+        12/23/13  = two simultaneously active ORFs
+        112/123   = nested ORFs (digits concatenated, sorted)
+
+    A stop codon on frame X wipes ALL active ORFs on frame X.
+    Values are stored at original (gap-inclusive) coordinates via pos_map.
+    Only forward strand ORFs should be passed — caller handles strand.
+    """
+    # work in clean-seq coordinate space first
+    clean_len = len(pos_map)
+    # per-frame open ORF counter in clean-seq space
+    frame_counts = {1: 0, 2: 0, 3: 0}
+
+    # build a list of events sorted by position
+    # event: (clean_pos, type, frame)
+    # type: 'start' or 'stop'
+    events: list[tuple[int, str, int]] = []
+    for orf in orfs:
+        if orf["strand"] != "+":
+            continue
+        frame = orf["frame"]
+        events.append((orf["start"], "start", frame))
+        events.append((orf["stop"] - 3, "stop",  frame))  # stop codon starts 3 before end
+
+    events.sort(key=lambda e: e[0])
+
+    # build event map: clean_pos → list of events at that position
+    from collections import defaultdict
+    event_map: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for pos, etype, frame in events:
+        event_map[pos].append((etype, frame))
+
+    # walk clean sequence, track active ORFs, write to original coords
+    tracker = [0] * seq_len
+
+    for clean_idx in range(clean_len):
+        # apply any events at this position
+        if clean_idx in event_map:
+            for etype, frame in event_map[clean_idx]:
+                if etype == "start":
+                    frame_counts[frame] += 1
+                elif etype == "stop":
+                    frame_counts[frame] = 0  # wipe ALL on this frame
+
+        # encode current state
+        digits = []
+        for frame in (1, 2, 3):
+            digits.extend([frame] * frame_counts[frame])
+        value = int("".join(str(d) for d in digits)) if digits else 0
+
+        # write to original coordinate
+        original_pos = pos_map[clean_idx]
+        tracker[original_pos] = value
+
+    # gap positions stay 0 (already initialized)
+    return tracker

@@ -20,6 +20,9 @@ try:
     from tqdm import tqdm
 except Exception:  # tqdm missing is fine
     tqdm = None
+#prodigal
+from my_project import microservices as ms_pipeline
+
 
 class TqdmToCallback:
     """
@@ -264,21 +267,75 @@ def run_pipeline(
     ref_seq_list     = list(data[1, :])
     evolved_seq_list = list(data[3, :])
 
-    aa_ref             = translate_nuc_row_active(ref_seq_list, CODON_TABLE)
-    aa_evolved         = translate_nuc_row_active(evolved_seq_list, CODON_TABLE)
-    ref_revcomp        = reverse_complement(ref_seq_list)
-    aa_ref_revcomp     = translate_nuc_row_active(ref_revcomp, CODON_TABLE)
-    evolved_revcomp    = reverse_complement(evolved_seq_list)
-    aa_evolved_revcomp = translate_nuc_row_active(evolved_revcomp, CODON_TABLE)
+    ref_seq_list     = list(data[1, :])
+    evolved_seq_list = list(data[3, :])
 
-    data2 = np.vstack([data, aa_ref, aa_evolved, ref_revcomp, aa_ref_revcomp, evolved_revcomp, aa_evolved_revcomp])
+    ref_revcomp     = reverse_complement(ref_seq_list)
+    evolved_revcomp = reverse_complement(evolved_seq_list)
+
+    seq_len = data.shape[1]
+    placeholder = [0] * seq_len  # rows 8,9,11,13 will be filled after prodigal
+
+    data2 = np.vstack([
+        data,
+        placeholder,      # row 8  — ref active ORF tracker (filled below)
+        placeholder,      # row 9  — evo active ORF tracker (filled below)
+        ref_revcomp,      # row 10 — revcomp ref nucleotides
+        placeholder,      # row 11 — revcomp ref active ORF tracker (filled below)
+        evolved_revcomp,  # row 12 — revcomp evo nucleotides
+        placeholder,      # row 13 — revcomp evo active ORF tracker (filled below)
+    ])
 
     # 6) Normalize dashes to N on specified rows
     N_matrix = data2.copy()
     for ridx in (1, 3, 10, 12):
         if ridx < N_matrix.shape[0]:
             N_matrix[ridx, :] = np.where(N_matrix[ridx, :] == '-', 'N', N_matrix[ridx, :])
+    log("Running Prodigal ORF prediction…")
 
+    tracker_seq_map = {
+        "forward_ref":     (1,  8),
+        "forward_evolved": (3,  9),
+        "revcomp_ref":     (10, 11),
+        "revcomp_evolved": (12, 13),
+    }
+
+    seq_names = list(tracker_seq_map.keys())
+
+    for seq_idx, (seq_name, (nuc_row_idx, tracker_row_idx)) in enumerate(tracker_seq_map.items()):
+        p("prodigal", seq_idx, 4)  # emit progress before starting each sequence
+        log(f"Prodigal: processing {seq_name}…")
+
+        nuc_row = data2[nuc_row_idx, :]
+
+        clean_seq = ""
+        pos_map   = []
+        for i, ch in enumerate(nuc_row):
+            if ch not in ('-', 'N'):
+                clean_seq += ch
+                pos_map.append(i)
+
+        try:
+            orfs = ms_pipeline.run_prodigal(clean_seq, seq_name=seq_name)
+            log(f"Prodigal: {len(orfs)} ORFs found in {seq_name}.")
+        except Exception as e:
+            log(f"Prodigal failed for {seq_name}: {e} — skipping tracker.")
+            orfs = []
+
+        tracker = ms_pipeline.build_active_orf_tracker(
+            seq     = clean_seq,
+            pos_map = pos_map,
+            seq_len = seq_len,
+            orfs    = orfs,
+        )
+
+        data2[tracker_row_idx, :] = tracker
+
+    p("prodigal", 4, 4)  # complete
+    log("Prodigal ORF prediction complete.")
+
+    for tracker_row in (8, 9, 11, 13):
+        N_matrix[tracker_row, :] = data2[tracker_row, :]
     # 7) Protein annotation rows (12 more)
     seq_indices = {"forward_ref": 1, "forward_evolved": 3, "revcomp_ref": 10, "revcomp_evolved": 12}
     sequences = {name: array_to_str(N_matrix[idx, :]) for name, idx in seq_indices.items()}
