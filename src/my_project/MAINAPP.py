@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from typing import Tuple, List
 from my_project.pypeline import run_pipeline
 #from my_project.pipeline import run_pipeline
-from my_project.visualization import plot_interactive_matrix
+#from my_project.visualization import plot_interactive_matrix
 
 
 # Your heavy deps (make sure they are installed in your venv)
@@ -303,6 +303,7 @@ if page == "Upload sequences":
                    q.put(("done", None))
                except Exception as e:
                    q.put(("error", e))
+                   
 
 
 
@@ -445,7 +446,8 @@ if page == "Submit to blast":
        st.stop()
 
    import pandas as pd
-   df = pd.DataFrame(rm, columns=["code", "start", "end"]).astype(int)
+   df = pd.DataFrame(rm, columns=["code", "ref_start", "ref_end", 
+                                 "evo_start", "evo_end", "tier"]).astype(int)
 
    st.session_state.setdefault("blast_logs", [])
    log_placeholder = None
@@ -486,24 +488,22 @@ if page == "Submit to blast":
 
    # --- multiselect replacing checkboxes ---
    mutation_options = []
-   for idx, (code, start, end) in enumerate(df.itertuples(index=False, name=None)):
-       is_revcomp = int(code) in (4, 5, 6)
-       try:
-           diffs = ms.diff_indices(int(code), int(start), int(end), info_matrix)
-       except Exception:
-           diffs = []
-       
-
-        # in the mutation options loop
-       types = [ms.mut_type_from_frameshift(int(gi), fs_row, revcomp=is_revcomp) 
-               for gi in range(int(start), int(end))]
-
-       
-       non_point = [t for t in types if t != "point"]
-       mut_type = max(set(non_point), key=non_point.count) if non_point else "point"
-       length = int(end - start)
-       label = f"Mutation {idx + 1} — code {code}, start {start}, end {end}, length {length}, diffs {len(diffs)}, type {mut_type}"
-       mutation_options.append(label)
+   for idx, (code, ref_start, ref_end, evo_start, evo_end, tier) in enumerate(
+        df.itertuples(index=False, name=None)):
+    is_revcomp = int(code) in (4, 5, 6)
+    frame_num = code if code <= 3 else code - 3
+    
+    # count actual diffs in the union of ref and evo spans
+    span_start = min(s for s in [ref_start, evo_start] if s != -1)
+    span_end   = max(e for e in [ref_end,   evo_end]   if e != -1)
+    r_row, e_row = (1, 3) if not is_revcomp else (10, 12)
+    diffs = ms.diff_indices_span(int(code), span_start, span_end, info_matrix)
+    
+    tier_label = {1: "exact", 2: "shifted", 3: "overlap/orphan"}.get(int(tier), "?")
+    label = (f"Mutation {idx+1} — frame {frame_num}{'rc' if is_revcomp else ''}, "
+             f"ref [{ref_start},{ref_end}] evo [{evo_start},{evo_end}], "
+             f"diffs {len(diffs)}, tier {tier_label}")
+    mutation_options.append(label)
 
    selected_labels = st.multiselect(
        "Select mutations",
@@ -543,7 +543,7 @@ if page == "Submit to blast":
        if not selected_rows:
            st.warning("Select at least one mutation before submitting to BLAST.")
        else:
-           subset_rows = df.iloc[selected_rows][["code", "start", "end"]].astype(int)
+           subset_rows = df.iloc[selected_rows][["code", "ref_start", "ref_end", "evo_start", "evo_end", "tier"]].astype(int)
            subset_matrix = subset_rows.to_numpy()
 
            log_buffer: list[str] = []
@@ -597,44 +597,81 @@ if page == "Submit to blast":
        selected_idx = st.session_state.get("selected_result_row")
        if selected_idx is not None:
            try:
-               code, start, end = map(int, df.iloc[selected_idx][["code", "start", "end"]].tolist())
+               code, ref_start, ref_end, evo_start, evo_end, tier = map(int, df.iloc[selected_idx][["code", "ref_start", "ref_end", "evo_start", "evo_end", "tier"]].tolist())
            except Exception:
-               code = start = end = None
+               code = ref_start = ref_end = evo_start = evo_end = tier = None
 
            if code is not None:
+               is_revcomp = int(code) in (4, 5, 6)
+               frame_num = code if code <= 3 else code - 3
+               r_row, e_row = (1, 3) if not is_revcomp else (10, 12)
+
+               # compute display window — union of ref and evo spans
+               valid_starts = [s for s in [ref_start, evo_start] if s != -1]
+               valid_ends   = [e for e in [ref_end,   evo_end]   if e != -1]
+               display_start = min(valid_starts) if valid_starts else 0
+               display_end   = max(valid_ends)   if valid_ends   else 0
+
                if mode == "DNA sequence":
-                   r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
-                   ref_slice = "".join(info_matrix[r_row, start:end].tolist())
-                   evo_slice = "".join(info_matrix[e_row, start:end].tolist())
+                   ref_slice = "".join(info_matrix[r_row, ref_start:ref_end].tolist()) if ref_start != -1 else ""
+                   evo_slice = "".join(info_matrix[e_row, evo_start:evo_end].tolist()) if evo_start != -1 else ""
+                   # pad shorter sequence at front so they align
+                   if ref_start != -1 and evo_start != -1 and ref_start != evo_start:
+                       if evo_start < ref_start:
+                           ref_slice = "-" * (ref_start - evo_start) + ref_slice
+                       else:
+                           evo_slice = "-" * (evo_start - ref_start) + evo_slice
                    st.subheader("DNA comparison")
                    st.markdown(
                        ms.highlighted_block(ref_slice, evo_slice,
-                                            a_label="REF (DNA)", b_label="EVO (DNA)", start_pos=start),
+                                            a_label="REF (DNA)", b_label="EVO (DNA)", start_pos=display_start),
                        unsafe_allow_html=True
                    )
                else:
-                   aa_map = {1: (14, 17), 2: (15, 18), 3: (16, 19), 4: (20, 23), 5: (21, 24), 6: (22, 25)}
-                   r_row, e_row = aa_map.get(code, (14, 17))
-                   ref_slice = "".join(info_matrix[r_row, start:end:3].tolist())
-                   evo_slice = "".join(info_matrix[e_row, start:end:3].tolist())
+                   aa_map = {1: (14, 17, 8, 9), 2: (15, 18, 8, 9), 3: (16, 19, 8, 9),
+                             4: (20, 23, 11, 13), 5: (21, 24, 11, 13), 6: (22, 25, 11, 13)}
+                   r_aa, e_aa, r_trk, e_trk = aa_map.get(code, (14, 17, 8, 9))
+
+                   def _get_aa(aa_row, trk_row, start, end):
+                       if start == -1:
+                           return ""
+                       return "".join(
+                           v for i, v in enumerate(info_matrix[aa_row, start:end:3].tolist())
+                           if ms.frame_active(int(info_matrix[trk_row, start + i*3]), frame_num)
+                           and start + i*3 < info_matrix.shape[1]
+                       ) or "(no ORF in this frame)"
+
+                   ref_slice = _get_aa(r_aa, r_trk, ref_start, ref_end)
+                   evo_slice = _get_aa(e_aa, e_trk, evo_start, evo_end)
+
+                   # pad at front so sequences align by genomic coordinate
+                   if ref_start != -1 and evo_start != -1 and ref_start != evo_start:
+                       ref_aa_start = ref_start
+                       evo_aa_start = evo_start
+                       if evo_aa_start < ref_aa_start:
+                           pad = (ref_aa_start - evo_aa_start) // 3
+                           ref_slice = "-" * pad + ref_slice
+                       else:
+                           pad = (evo_aa_start - ref_aa_start) // 3
+                           evo_slice = "-" * pad + evo_slice
+
                    st.subheader("Amino acid comparison")
                    st.markdown(
                        ms.highlighted_block(ref_slice, evo_slice,
-                                            a_label="REF (AA)", b_label="EVO (AA)", start_pos=start),
+                                            a_label="REF (AA)", b_label="EVO (AA)", start_pos=display_start),
                        unsafe_allow_html=True
                    )
 
                st.markdown("---")
                st.subheader(f"Mutation {selected_idx + 1} details")
-
-               diffs_nt = ms.diff_indices(code, start, end, info_matrix)
+               span_start = display_start
+               span_end   = display_end
+               diffs_nt = ms.diff_indices_span(code, span_start, span_end, info_matrix)
                fs_row = info_matrix[5, :]
-               dna_r, dna_e = (1, 3) if code in (1, 2, 3) else (10, 12)
+               dna_r, dna_e = (1, 3) if not is_revcomp else (10, 12)
                aa_map = {1: (14, 17), 2: (15, 18), 3: (16, 19), 4: (20, 23), 5: (21, 24), 6: (22, 25)}
                aa_r, aa_e = aa_map.get(code, (14, 17))
-
                nt_detail = []
-               is_revcomp = int(code) in (4, 5, 6)
                for gi in diffs_nt:
                    try:
                        ref_base = str(info_matrix[dna_r, gi])
@@ -713,7 +750,8 @@ if page == "View":
        if rm is None or getattr(rm, "size", 0) == 0 or info_matrix is None:
            st.info("No mutation data available yet.")
        else:
-           df = pd.DataFrame(rm, columns=["code", "start", "end"]).astype(int)
+           df = pd.DataFrame(rm, columns=["code", "ref_start", "ref_end", 
+                                 "evo_start", "evo_end", "tier"]).astype(int)
            selected_rows = sorted(
                i for i, checked in st.session_state.get("mut_checks", {}).items() if checked and i < len(df)
            )
@@ -822,26 +860,46 @@ if page == "View":
                    """,
                    unsafe_allow_html=True,
                )
+               def _retrieve_sequences(code: int, ref_start: int, ref_end: int, evo_start: int, evo_end: int) -> tuple[str, str, str, str]:
+                is_revcomp = code in (4, 5, 6)
+                frame_num = code if code <= 3 else code - 3
 
-               def _retrieve_sequences(code: int, start: int, end: int) -> tuple[str, str, str, str]:
-                   if mode == "DNA sequence":
-                       r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
-                       ref_slice = "".join(info_matrix[r_row, start:end].tolist())
-                       evo_slice = "".join(info_matrix[e_row, start:end].tolist())
-                       return ref_slice, evo_slice, "REF (DNA)", "EVO (DNA)"
-                   aa_map = {
-                       1: (14, 17),
-                       2: (15, 18),
-                       3: (16, 19),
-                       4: (20, 23),
-                       5: (21, 24),
-                       6: (22, 25),
-                   }
-                   r_row, e_row = aa_map.get(code, (14, 17))
-                   ref_slice = "".join(info_matrix[r_row, start:end:3].tolist())
-                   evo_slice = "".join(info_matrix[e_row, start:end:3].tolist())
-                   return ref_slice, evo_slice, "REF (AA)", "EVO (AA)"
+                if mode == "DNA sequence":
+                    r_row, e_row = (1, 3) if not is_revcomp else (10, 12)
+                    ref_slice = "".join(info_matrix[r_row, ref_start:ref_end].tolist()) if ref_start != -1 else ""
+                    evo_slice = "".join(info_matrix[e_row, evo_start:evo_end].tolist()) if evo_start != -1 else ""
+                    if ref_start != -1 and evo_start != -1 and ref_start != evo_start:
+                        if evo_start < ref_start:
+                            ref_slice = "-" * (ref_start - evo_start) + ref_slice
+                        else:
+                            evo_slice = "-" * (evo_start - ref_start) + evo_slice
+                    return ref_slice, evo_slice, "REF (DNA)", "EVO (DNA)"
 
+                aa_map = {1: (14, 17, 8, 9), 2: (15, 18, 8, 9), 3: (16, 19, 8, 9),
+                        4: (20, 23, 11, 13), 5: (21, 24, 11, 13), 6: (22, 25, 11, 13)}
+                r_aa, e_aa, r_trk, e_trk = aa_map.get(code, (14, 17, 8, 9))
+
+                def _get_aa(aa_row, trk_row, start, end):
+                    if start == -1:
+                        return ""
+                    return "".join(
+                        v for i, v in enumerate(info_matrix[aa_row, start:end:3].tolist())
+                        if ms.frame_active(int(info_matrix[trk_row, start + i*3]), frame_num)
+                        and start + i*3 < info_matrix.shape[1]
+                    ) or "(no ORF in this frame)"
+
+                ref_slice = _get_aa(r_aa, r_trk, ref_start, ref_end)
+                evo_slice = _get_aa(e_aa, e_trk, evo_start, evo_end)
+
+                if ref_start != -1 and evo_start != -1 and ref_start != evo_start:
+                    if evo_start < ref_start:
+                        pad = (ref_start - evo_start) // 3
+                        ref_slice = "-" * pad + ref_slice
+                    else:
+                        pad = (evo_start - ref_start) // 3
+                        evo_slice = "-" * pad + evo_slice
+
+                return ref_slice, evo_slice, "REF (AA)", "EVO (AA)"
                def _chunk_size(length: int) -> int:
                    return wrap_width if wrap_width else max(length, 1)
 
@@ -893,12 +951,17 @@ if page == "View":
                for pos, idx in enumerate(selected_rows):
                    row = df.iloc[idx]
                    code = int(row["code"])
-                   start = int(row["start"])
-                   end = int(row["end"])
-                   ref_seq, evo_seq, ref_label, evo_label = _retrieve_sequences(code, start, end)
-                   chunk = _chunk_size(len(ref_seq))
-                   header = f"Mutation {idx + 1} — code {code}, start {start}, end {end}"
-                   highlight_html = _build_highlight_html(ref_seq, evo_seq, ref_label, evo_label, start, pdf_mode, chunk)
+                   ref_start = int(row["ref_start"])
+                   ref_end = int(row["ref_end"])
+                   evo_start = int(row["evo_start"])
+                   evo_end = int(row["evo_end"])
+                   ref_seq, evo_seq, ref_label, evo_label = _retrieve_sequences(code, ref_start, ref_end, evo_start, evo_end)
+                   header = f"Mutation {idx + 1} — code {code}, ref [{ref_start},{ref_end}] evo [{evo_start},{evo_end}]"
+                   chunk = _chunk_size(max(len(ref_seq), len(evo_seq)))
+                   highlight_html = _build_highlight_html(ref_seq, evo_seq, ref_label, evo_label, min(ref_start, evo_start) if ref_start != -1 and evo_start != -1 else max(ref_start, evo_start), pdf_mode, chunk)
+                   highlight_html = _build_highlight_html(ref_seq, evo_seq, ref_label, evo_label, min(ref_start, evo_start) if ref_start != -1 and evo_start != -1 else max(ref_start, evo_start), pdf_mode, chunk)
+                   display_start = min(ref_start, evo_start) if ref_start != -1 and evo_start != -1 else (ref_start if ref_start != -1 else evo_start)
+                   highlight_html = _build_highlight_html(ref_seq, evo_seq, ref_label, evo_label, display_start, pdf_mode, chunk)
 
                    blast_section = ""
                    if show_blast:
@@ -921,7 +984,7 @@ if page == "View":
                        f"</div>"
                    )
                    render_blocks.append(block_html)
-                   copy_text = _build_copy_block(header, ref_label, evo_label, ref_seq, evo_seq, start, chunk)
+                   copy_text = _build_copy_block(header, ref_label, evo_label, ref_seq, evo_seq, display_start, chunk)
                    copy_blocks.append(copy_text)
                if copy_blocks:
                    combined_joiner = "\n\f\n" if pdf_mode else "\n\n"
@@ -1118,3 +1181,22 @@ if page == "Debug":
 
             st.dataframe(cheat_df, use_container_width=True, hide_index=True)
 
+def _worker():
+    try:
+        res = run_pipeline(
+            rotated_ref=rotated_ref,
+            rotated_evolved=rotated_evolved,
+            n_sections=int(n_sections),
+            threshold=float(threshold),
+            do_full=bool(do_full),
+            on_progress=_on_progress,
+            on_log=_on_log,
+            do_blast=bool(st.session_state.get("do_blast", False)),
+        )
+        _result["val"] = res
+        q.put(("done", None))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"PIPELINE EXCEPTION:\n{tb}", flush=True)  # add this
+        q.put(("error", e))

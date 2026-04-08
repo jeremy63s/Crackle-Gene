@@ -6,6 +6,7 @@ from typing import Dict, Tuple
 import subprocess
 import tempfile
 import os
+import numpy as np
 
 # IUPAC DNA (includes RNA U) + gap '-'
 _AMBIG = set("ACGTURYSWKMBDHVN-")
@@ -322,4 +323,274 @@ def build_active_orf_tracker(
         tracker[original_pos] = value
 
     # gap positions stay 0 (already initialized)
-    return tracker
+# mark gap positions with -1 so boundary detection isn't fooled by gaps
+
+    tracker_arr = np.array(tracker)
+    covered = np.zeros(seq_len, dtype=bool)
+    covered[pos_map] = True
+    tracker_arr[~covered] = -1
+    return tracker_arr.tolist()
+
+from collections import defaultdict
+
+def _parse_active_value(value: int) -> list[int]:
+    """
+    Parse an active ORF tracker integer into a list of active frame numbers.
+    Example: 113 -> [1, 1, 3], 23 -> [2, 3], 0 -> []
+    """
+    if value <= 0:
+        return []
+    return [int(d) for d in str(value)]
+
+
+def _find_orf_boundaries(
+    tracker_row: np.ndarray,
+    mutation_idx: int,
+    frame: int,
+    seq_len: int,
+) -> tuple[int, int] | None:
+    """
+    Given a mutation index and a specific frame number, search backwards and
+    forwards in tracker_row to find where that frame's ORF begins and ends.
+    Skips -1 (gap sentinel) values.
+    Returns (start, end) in global info_matrix coordinates, or None if not found.
+    """
+    # search backwards for start
+    start = None
+    for i in range(mutation_idx, -1, -1):
+        val = int(tracker_row[i])
+        if val == -1:
+            continue  # skip gap sentinels
+        frames_here = _parse_active_value(val)
+        if frame not in frames_here:
+            start = i + 1
+            break
+    if start is None:
+        start = 0  # hit the beginning of the sequence
+
+    # search forwards for end
+    end = None
+    for i in range(mutation_idx, seq_len):
+        val = int(tracker_row[i])
+        if val == -1:
+            continue  # skip gap sentinels
+        frames_here = _parse_active_value(val)
+        if frame not in frames_here:
+            end = i
+            break
+    if end is None:
+        end = seq_len  # hit the end of the sequence
+
+    if start >= end:
+        return None
+    return (start, end)
+
+
+def _extract_affected_orfs(
+    tracker_row: np.ndarray,
+    mutation_idx: int,
+    seq_len: int,
+) -> list[tuple[int, int, int]]:
+    val = int(tracker_row[mutation_idx])
+    if val <= 0:  # 0 = no ORF, -1 = gap — skip entirely
+        return []
+    # only search for frames present at THIS mutation index
+    # do not drift into neighboring ORFs
+    frames_at_mutation = _parse_active_value(val)
+    seen = set()
+    results = []
+    for frame in frames_at_mutation:
+        boundaries = _find_orf_boundaries(tracker_row, mutation_idx, frame, seq_len)
+        if boundaries is None:
+            continue
+        # verify the mutation index is actually within the boundaries
+        if not (boundaries[0] <= mutation_idx <= boundaries[1]):
+            continue  # boundary drifted — skip
+        key = (frame, boundaries[0], boundaries[1])
+        if key not in seen:
+            seen.add(key)
+            results.append(key)
+    return results
+
+def _frameshift_at(info_matrix: np.ndarray, pos: int, forward: bool) -> int:
+    """
+    Returns (ref_nt_count - evo_nt_count) % 3 for non-spacer nucleotides
+    from position 0 up to but not including pos.
+    For forward sequences uses rows 1 and 3, for revcomp uses rows 10 and 12.
+    """
+    if forward:
+        ref_row, evo_row = 1, 3
+    else:
+        ref_row, evo_row = 10, 12
+    ref_count = sum(1 for v in info_matrix[ref_row, :pos] if v not in ('-', 'N', 'X'))
+    evo_count = sum(1 for v in info_matrix[evo_row, :pos] if v not in ('-', 'N', 'X'))
+    return (ref_count - evo_count) % 3
+
+def find_mutated_orfs(
+    info_matrix: np.ndarray,
+    forward: bool = True,
+) -> list[dict]:
+    if forward:
+        ref_nuc_row, evo_nuc_row = 1, 3
+        ref_trk_row, evo_trk_row = 8, 9
+    else:
+        ref_nuc_row, evo_nuc_row = 10, 12
+        ref_trk_row, evo_trk_row = 11, 13
+
+    seq_len = info_matrix.shape[1]
+    ref_nuc = info_matrix[ref_nuc_row]
+    evo_nuc = info_matrix[evo_nuc_row]
+    ref_trk = info_matrix[ref_trk_row].astype(int)
+    evo_trk = info_matrix[evo_trk_row].astype(int)
+
+    mismatch_indices = [
+        i for i in range(seq_len)
+        if ref_nuc[i] != evo_nuc[i]
+    ]
+
+    ref_orfs_at_mutations: dict[tuple[int,int,int], list[int]] = defaultdict(list)
+    evo_orfs_at_mutations: dict[tuple[int,int,int], list[int]] = defaultdict(list)
+
+    for idx in mismatch_indices:
+        for orf in _extract_affected_orfs(ref_trk, idx, seq_len):
+            ref_orfs_at_mutations[orf].append(idx)
+        for orf in _extract_affected_orfs(evo_trk, idx, seq_len):
+            evo_orfs_at_mutations[orf].append(idx)
+
+    ref_orf_set = set(ref_orfs_at_mutations.keys())
+    evo_orf_set = set(evo_orfs_at_mutations.keys())
+
+    results = []
+    paired_evo = set()
+
+    # tier 1: same absolute start AND end coordinates regardless of frame
+    for ref_orf in sorted(ref_orf_set):
+        ref_frame, ref_start, ref_end = ref_orf
+        for evo_orf in sorted(evo_orf_set):
+            evo_frame, evo_start, evo_end = evo_orf
+            if ref_start == evo_start and ref_end == evo_end:
+                results.append({
+                    "ref_orf": ref_orf,
+                    "evo_orf": evo_orf,
+                    "pair_tier": 1,
+                    "forward": forward,
+                    "mutation_indices": sorted(set(
+                        ref_orfs_at_mutations[ref_orf] +
+                        evo_orfs_at_mutations[evo_orf]
+                    )),
+                })
+                paired_evo.add(evo_orf)
+                break
+
+    paired_ref = {r["ref_orf"] for r in results}
+    unpaired_ref = ref_orf_set - paired_ref
+    unpaired_evo = evo_orf_set - paired_evo
+
+    # tier 2: start OR stop aligns, and relative frameshift is consistent
+    for ref_orf in sorted(unpaired_ref):
+        ref_frame, ref_start, ref_end = ref_orf
+        best_evo = None
+        best_score = -1
+
+        for evo_orf in sorted(unpaired_evo):
+            evo_frame, evo_start, evo_end = evo_orf
+
+            start_matches = ref_start == evo_start
+            end_matches = ref_end == evo_end
+
+            if not start_matches and not end_matches:
+                continue
+
+            # check relative frameshift at the matching codon boundary
+            check_pos = ref_start if start_matches else ref_end
+            fs = _frameshift_at(info_matrix, check_pos, forward)
+            expected_evo_frame = ((ref_frame - 1 - fs) % 3) + 1
+            if evo_frame != expected_evo_frame:
+                continue
+
+            # prefer end match over start match as tiebreaker
+            score = 2 if end_matches else 1
+            if score > best_score:
+                best_score = score
+                best_evo = evo_orf
+
+        if best_evo is not None:
+            results.append({
+                "ref_orf": ref_orf,
+                "evo_orf": best_evo,
+                "pair_tier": 2,
+                "forward": forward,
+                "mutation_indices": sorted(set(
+                    ref_orfs_at_mutations[ref_orf] +
+                    evo_orfs_at_mutations[best_evo]
+                )),
+            })
+            paired_evo.add(best_evo)
+            unpaired_evo.discard(best_evo)
+
+    paired_ref = {r["ref_orf"] for r in results}
+    unpaired_ref = ref_orf_set - paired_ref
+
+    # tier 3: one ORF starts inside the other's span
+    for ref_orf in sorted(unpaired_ref):
+        ref_frame, ref_start, ref_end = ref_orf
+        best_evo = None
+        best_overlap = 0
+
+        for evo_orf in sorted(unpaired_evo):
+            evo_frame, evo_start, evo_end = evo_orf
+            # check if either starts inside the other
+            ref_starts_inside_evo = evo_start <= ref_start <= evo_end
+            evo_starts_inside_ref = ref_start <= evo_start <= ref_end
+            if not ref_starts_inside_evo and not evo_starts_inside_ref:
+                continue
+            overlap = min(ref_end, evo_end) - max(ref_start, evo_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_evo = evo_orf
+
+        if best_evo is not None:
+            results.append({
+                "ref_orf": ref_orf,
+                "evo_orf": best_evo,
+                "pair_tier": 3,
+                "forward": forward,
+                "mutation_indices": sorted(set(
+                    ref_orfs_at_mutations[ref_orf] +
+                    evo_orfs_at_mutations[best_evo]
+                )),
+            })
+            paired_evo.add(best_evo)
+            unpaired_evo.discard(best_evo)
+
+    paired_ref = {r["ref_orf"] for r in results}
+    unpaired_ref = ref_orf_set - paired_ref
+
+    # remaining orphans
+    for ref_orf in sorted(unpaired_ref):
+        results.append({
+            "ref_orf": ref_orf,
+            "evo_orf": None,
+            "pair_tier": 3,
+            "forward": forward,
+            "mutation_indices": ref_orfs_at_mutations[ref_orf],
+        })
+    for evo_orf in sorted(unpaired_evo):
+        results.append({
+            "ref_orf": None,
+            "evo_orf": evo_orf,
+            "pair_tier": 3,
+            "forward": forward,
+            "mutation_indices": evo_orfs_at_mutations[evo_orf],
+        })
+
+    return results
+
+def diff_indices_span(code: int, start: int, end: int, info_matrix) -> list:
+    r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
+    if start < 0 or end < 0:
+        return []
+    ref = info_matrix[r_row, start:end]
+    evo = info_matrix[e_row, start:end]
+    return [start + i for i, (a, b) in enumerate(zip(ref, evo))
+            if a != b and a not in ('-', 'N') and b not in ('-', 'N')]

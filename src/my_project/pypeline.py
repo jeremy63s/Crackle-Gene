@@ -260,6 +260,23 @@ def run_pipeline(
     bar_m.close()
 
     final_matrix = np.array(build_final_matrix(chunk_matrices))
+    final_matrix = np.array(build_final_matrix(chunk_matrices))
+
+    # recompute frameshift counter as true cumulative across entire sequence
+    fs_cumulative = []
+    current = 0
+    for i in range(final_matrix.shape[1]):
+        ref_base = str(final_matrix[1, i])
+        evo_base = str(final_matrix[3, i])
+        ref_is_gap = ref_base in ('-', 'N') or ref_base.upper() not in {'A','C','G','T','N'}
+        evo_is_gap = evo_base in ('-', 'N') or evo_base.upper() not in {'A','C','G','T','N'}
+        if ref_is_gap and not evo_is_gap:
+            current -= 1
+        elif evo_is_gap and not ref_is_gap:
+            current += 1
+        fs_cumulative.append(current)
+
+    final_matrix[5, :] = fs_cumulative
     match_map = {(m["evo_index"], m["ref_index"]): m for m in matches}
 
     # 5) Augment with AA / reverse complements
@@ -337,68 +354,97 @@ def run_pipeline(
     for tracker_row in (8, 9, 11, 13):
         N_matrix[tracker_row, :] = data2[tracker_row, :]
     # 7) Protein annotation rows (12 more)
-    seq_indices = {"forward_ref": 1, "forward_evolved": 3, "revcomp_ref": 10, "revcomp_evolved": 12}
-    sequences = {name: array_to_str(N_matrix[idx, :]) for name, idx in seq_indices.items()}
 
-    results_ann = {}
-    for name, seq in sequences.items():
-        seq_len = len(seq)
-        frame_annotations = {0: create_annotation_array(seq_len), 1: create_annotation_array(seq_len), 2: create_annotation_array(seq_len)}
-        for start, stop, strand_val, description in orfipy_core.orfs(seq, minlen=3, maxlen=1_000_000, strand='f'):
-            frame_val = parse_orf_frame(description)
-            if frame_val is None: continue
-            frame_idx = frame_val - 1
-            protein_seq = str(Seq(seq[start:stop]).translate(to_stop=True))
-            for i, aa in enumerate(protein_seq):
-                codon_start = start + i * 3
-                for pos in range(codon_start, min(codon_start + 3, seq_len)):
-                    frame_annotations[frame_idx][pos] = aa
-        results_ann[name] = frame_annotations
+    seq_map_translation = [
+        (1,  "forward_ref"),
+        (3,  "forward_evolved"),
+        (10, "revcomp_ref"),
+        (12, "revcomp_evolved"),
+    ]
 
     protein_matrix_rows: List[np.ndarray] = []
-    for seq_name in ["forward_ref", "forward_evolved", "revcomp_ref", "revcomp_evolved"]:
-        fa = results_ann[seq_name]
-        for frame in range(3):
-            protein_matrix_rows.append(fa[frame])
+    for nuc_row_idx, seq_name in seq_map_translation:
+        nuc_row = data2[nuc_row_idx, :]
+
+        clean_seq = ""
+        pos_map = []
+        for i, ch in enumerate(nuc_row):
+            if ch not in ('-', 'N'):
+                clean_seq += ch
+                pos_map.append(i)
+
+        for frame_offset in range(3):
+            aa_array = ['X'] * seq_len
+            for codon_idx in range(frame_offset, len(clean_seq) - 2, 3):
+                codon = clean_seq[codon_idx:codon_idx + 3]
+                aa = CODON_TABLE.get(codon.upper(), None)
+                if aa is None:
+                    translated = 'X'
+                elif aa == '*':
+                    translated = '*'
+                else:
+                    translated = aa
+                for offset in range(3):
+                    clean_pos = codon_idx + offset
+                    if clean_pos < len(pos_map):
+                        aa_array[pos_map[clean_pos]] = translated
+            protein_matrix_rows.append(aa_array)
+
     protein_matrix = np.array(protein_matrix_rows)
 
     info_matrix = np.vstack((N_matrix, protein_matrix))
-
-    # 8) ORF diffs → result_matrix
-    a_map = {1: 14, 2: 15, 3: 16, 4: 20, 5: 21, 6: 22}
-    # --- ORF diffs → result_matrix ---
-    orf_mapping = {
-        "ORF1_forward": {"code": 1, "rows": (14, 17)},
-        "ORF2_forward": {"code": 2, "rows": (15, 18)},
-        "ORF3_forward": {"code": 3, "rows": (16, 19)},
-        "ORF1_reverse": {"code": 4, "rows": (20, 23)},
-        "ORF2_reverse": {"code": 5, "rows": (21, 24)},
-        "ORF3_reverse": {"code": 6, "rows": (22, 25)},
-    }
-
-    all_results: List[Tuple[int, int, int]] = []
-    for _, props in orf_mapping.items():
-        code = props["code"]
-        r1, r2 = props["rows"]
-        # where rows differ ⇒ ORF segment
-        arr = np.where(info_matrix[r1, :] != info_matrix[r2, :])[0].astype(int)
-        rows = process_orf_array(info_matrix, arr, r1, r2, code)
-        all_results.extend(rows)
-
-    result_matrix = np.array(all_results) if all_results else np.empty((0, 3), dtype=int)
-
-    # --- BLAST (names back to UI) ---
+# --- BLAST (names back to UI) ---
     blast_names = {}
     try:
         blast_names = process_result_matrix(
             info_matrix,
-            result_matrix,
-            do_blast=bool(do_blast),  # <-- forward the checkbox flag
-            on_log=on_log,  # <-- forward logger so messages appear in Streamlit
+            np.empty((0, 3), dtype=int),
+            do_blast=bool(do_blast),
+            on_log=on_log,
         ) or {}
     except Exception as e:
         if on_log:
             on_log(f"BLAST step skipped/failed: {e}")
+
+        ...
+    # 8) ORF diffs → result_matrix
+    all_mutated_orfs = []
+    try:
+        log("Finding mutated ORFs…")
+        forward_mutated = ms_pipeline.find_mutated_orfs(info_matrix, forward=True)
+        revcomp_mutated = ms_pipeline.find_mutated_orfs(info_matrix, forward=False)
+        all_mutated_orfs = forward_mutated + revcomp_mutated
+        log(f"Found {len(all_mutated_orfs)} mutated ORF pairs "
+            f"({sum(1 for r in all_mutated_orfs if r['pair_tier']==1)} exact, "
+            f"{sum(1 for r in all_mutated_orfs if r['pair_tier']==2)} overlapping, "
+            f"{sum(1 for r in all_mutated_orfs if r['pair_tier']==3)} orphaned).")
+    except Exception as e:
+        import traceback
+        log(f"find_mutated_orfs failed: {e}\n{traceback.format_exc()}")
+# test
+    all_results = []
+    for entry in all_mutated_orfs:
+        is_revcomp = not entry.get("forward", True)
+        ref_orf = entry.get("ref_orf")
+        evo_orf = entry.get("evo_orf")
+        tier = entry["pair_tier"]
+
+        # code = ref frame (1-3 forward, 4-6 revcomp), -1 if no ref orf
+        if ref_orf is not None:
+            frame, ref_start, ref_end = ref_orf
+            code = frame + (3 if is_revcomp else 0)
+        else:
+            frame, evo_start_tmp, _ = evo_orf
+            code = frame + (3 if is_revcomp else 0)
+
+        ref_start = ref_orf[1] if ref_orf is not None else -1
+        ref_end   = ref_orf[2] if ref_orf is not None else -1
+        evo_start = evo_orf[1] if evo_orf is not None else -1
+        evo_end   = evo_orf[2] if evo_orf is not None else -1
+
+        all_results.append([code, ref_start, ref_end, evo_start, evo_end, tier])
+
+    result_matrix = np.array(all_results, dtype=int) if all_results else np.empty((0, 6), dtype=int)
 
     # 9) Isolation-Forest anomaly detection
     isolation_forest_results: Optional[Dict[str, Any]] = None
@@ -410,8 +456,9 @@ def run_pipeline(
         log(f"Isolation Forest complete: {n_anomalies}/{n_sections} anomalous chunks detected.")
     except Exception as e:
         import traceback
-        isolation_forest_error = f"{e}\n{traceback.format_exc()}"
-        log(f"Isolation Forest step failed: {isolation_forest_error}")
+        tb = traceback.format_exc()
+        log(f"find_mutated_orfs failed: {e}\n{tb}")
+        print(f"CRITICAL ERROR IN find_mutated_orfs:\n{tb}", flush=True)
 
     # --- return everything the UI needs ---
     return {
@@ -425,8 +472,9 @@ def run_pipeline(
         "match_map": match_map,
         "info_matrix": info_matrix,
         "result_matrix": result_matrix,
-        "blast_names": blast_names,  # <-- Tab 2 reads names from here
-        "isolation_forest": isolation_forest_results,  # None if step failed
+        "blast_names": blast_names,
+        "isolation_forest": isolation_forest_results,
         "isolation_forest_error": isolation_forest_error,
+        "mutated_orfs": all_mutated_orfs,
     }
 

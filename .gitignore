@@ -100,3 +100,6 @@ results/
 *.gb
 
 UI.py
+monolith.md
+sanity.py
+visualization.py
