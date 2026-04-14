@@ -6,6 +6,7 @@ from typing import Dict, Tuple
 import subprocess
 import tempfile
 import os
+import numpy as np
 
 # IUPAC DNA (includes RNA U) + gap '-'
 _AMBIG = set("ACGTURYSWKMBDHVN-")
@@ -289,7 +290,7 @@ def build_active_orf_tracker(
             continue
         frame = orf["frame"]
         events.append((orf["start"], "start", frame))
-        events.append((orf["stop"] - 3, "stop",  frame))  # stop codon starts 3 before end
+        events.append((orf["stop"], "stop",  frame))  
 
     events.sort(key=lambda e: e[0])
 
@@ -322,4 +323,392 @@ def build_active_orf_tracker(
         tracker[original_pos] = value
 
     # gap positions stay 0 (already initialized)
-    return tracker
+# mark gap positions with -1 so boundary detection isn't fooled by gaps
+
+    tracker_arr = np.array(tracker)
+    covered = np.zeros(seq_len, dtype=bool)
+    covered[pos_map] = True
+    tracker_arr[~covered] = -1
+    return tracker_arr.tolist()
+
+from collections import defaultdict
+
+def _parse_active_value(value: int) -> list[int]:
+    """
+    Parse an active ORF tracker integer into a list of active frame numbers.
+    Example: 113 -> [1, 1, 3], 23 -> [2, 3], 0 -> []
+    """
+    if value <= 0:
+        return []
+    return [int(d) for d in str(value)]
+
+
+def _find_orf_boundaries(
+    tracker_row: np.ndarray,
+    mutation_idx: int,
+    frame: int,
+    seq_len: int,
+) -> tuple[int, int] | None:
+    """
+    Given a mutation index and a specific frame number, search backwards and
+    forwards in tracker_row to find where that frame's ORF begins and ends.
+    Skips -1 (gap sentinel) values.
+    Returns (start, end) in global info_matrix coordinates, or None if not found.
+    """
+    # search backwards for start
+    start = None
+    for i in range(mutation_idx, -1, -1):
+        val = int(tracker_row[i])
+        if val == -1:
+            continue  # skip gap sentinels
+        frames_here = _parse_active_value(val)
+        if frame not in frames_here:
+            start = i + 1
+            break
+    if start is None:
+        start = 0  # hit the beginning of the sequence
+
+    # search forwards for end
+    end = None
+    for i in range(mutation_idx, seq_len):
+        val = int(tracker_row[i])
+        if val == -1:
+            continue  # skip gap sentinels
+        frames_here = _parse_active_value(val)
+        if frame not in frames_here:
+            end = i
+            break
+    if end is None:
+        end = seq_len  # hit the end of the sequence
+
+    if start >= end:
+        return None
+    return (start, end)
+
+
+def _extract_affected_orfs(
+    tracker_row: np.ndarray,
+    mutation_idx: int,
+    seq_len: int,
+) -> list[tuple[int, int, int]]:
+    val = int(tracker_row[mutation_idx])
+    if val <= 0:  # 0 = no ORF, -1 = gap — skip entirely
+        return []
+    # only search for frames present at THIS mutation index
+    # do not drift into neighboring ORFs
+    frames_at_mutation = _parse_active_value(val)
+    seen = set()
+    results = []
+    for frame in frames_at_mutation:
+        boundaries = _find_orf_boundaries(tracker_row, mutation_idx, frame, seq_len)
+        if boundaries is None:
+            continue
+        # verify the mutation index is actually within the boundaries
+        if not (boundaries[0] <= mutation_idx <= boundaries[1]):
+            continue  # boundary drifted — skip
+        key = (frame, boundaries[0], boundaries[1])
+        if key not in seen:
+            seen.add(key)
+            results.append(key)
+    return results
+
+def diff_indices_span(code: int, start: int, end: int, info_matrix) -> list:
+    r_row, e_row = (1, 3) if code in (1, 2, 3) else (10, 12)
+    if start < 0 or end < 0:
+        return []
+    ref = info_matrix[r_row, start:end]
+    evo = info_matrix[e_row, start:end]
+    return [start + i for i, (a, b) in enumerate(zip(ref, evo))
+            if a != b and a not in ('-', 'N') and b not in ('-', 'N')]
+
+#new pairing system helpers
+def num_digits_vec(arr):
+    """Vectorized digit counter for ORF tracker arrays. -1 stays -1."""
+    result = np.zeros(len(arr), dtype=int)
+    mask = arr > 0
+    if mask.any():
+        result[mask] = np.array([len(str(int(v))) for v in arr[mask]])
+    result[arr == -1] = -1
+    return result
+
+def get_transition_sequence(window):
+    stripped = [(i, v) for i, v in enumerate(window) if v != -1]
+    transitions = []
+    for pos in range(1, len(stripped)):
+        _, curr = stripped[pos]
+        _, prev = stripped[pos - 1]
+        if curr != prev:
+            transitions.append((pos, num_digits(prev), num_digits(curr)))
+    return transitions
+
+def truncate_at_neg1(window, start_from=2):
+    for i in range(start_from, len(window)):
+        if window[i] == -1:
+            return window[:i]
+    return window
+
+def num_digits(val):
+    if val == 0:
+        return 1
+    return len(str(int(abs(val))))
+
+def should_remove_pair(win_a, win_b):
+    wa, wb = list(win_a), list(win_b)
+    a1 = wa[1] if len(wa) > 1 else 0
+    b1 = wb[1] if len(wb) > 1 else 0
+    if a1 > 0 or b1 > 0:
+        return False
+    wa = truncate_at_neg1(wa, start_from=2)
+    wb = truncate_at_neg1(wb, start_from=2)
+    trans_a = get_transition_sequence(wa)
+    trans_b = get_transition_sequence(wb)
+    return trans_a == trans_b
+
+# ── AA row lookup ────────────────────────────────────────────────────────────
+_AA_ROW_MAP = {
+    (8,  1): 14, (8,  2): 15, (8,  3): 16,
+    (9,  1): 17, (9,  2): 18, (9,  3): 19,
+    (11, 1): 20, (11, 2): 21, (11, 3): 22,
+    (13, 1): 23, (13, 2): 24, (13, 3): 25,
+}
+
+_REF_TRACKER_ROWS  = {8, 11}
+_EVO_TRACKER_ROWS  = {9, 13}
+_FWD_TRACKER_ROWS  = {8, 9}
+_REV_TRACKER_ROWS  = {11, 13}
+
+def aa_row_for(tracker_row: int, frame: int) -> int:
+    return _AA_ROW_MAP[(tracker_row, frame)]
+
+def is_ref_row(tracker_row: int) -> bool:
+    return tracker_row in _REF_TRACKER_ROWS
+
+def is_fwd_row(tracker_row: int) -> bool:
+    return tracker_row in _FWD_TRACKER_ROWS
+
+def score_orf_pairing(
+    info_matrix: np.ndarray,
+    ref_row: int, ref_frame: int, ref_start: int, ref_end: int,
+    evo_row: int, evo_frame: int, evo_start: int, evo_end: int,
+) -> dict:
+    """
+    Score a candidate ref/evo ORF pairing by counting identical AAs
+    in the overlapping coordinate window.
+    Returns dict with overlap_start, overlap_end, match_count, overlap_len, score.
+    """
+    overlap_start = max(ref_start, evo_start)
+    overlap_end   = min(ref_end,   evo_end)
+
+    if overlap_start >= overlap_end:
+        return {
+            "overlap_start": overlap_start,
+            "overlap_end":   overlap_end,
+            "match_count":   0,
+            "overlap_len":   0,
+            "score":         0.0,
+        }
+
+    ref_aa_row = aa_row_for(ref_row, ref_frame)
+    evo_aa_row = aa_row_for(evo_row, evo_frame)
+
+    _skip = {'X', '*', '-', None, 'N', ''}
+
+    match_count = 0
+    overlap_len = 0
+    for i in range(overlap_start, overlap_end):
+        r = info_matrix[ref_aa_row, i]
+        e = info_matrix[evo_aa_row, i]
+        if r in _skip or e in _skip:
+            continue
+        overlap_len += 1
+        if r == e:
+            match_count += 1
+
+    score = match_count / overlap_len if overlap_len > 0 else 0.0
+    return {
+        "overlap_start": overlap_start,
+        "overlap_end":   overlap_end,
+        "match_count":   match_count,
+        "overlap_len":   overlap_len,
+        "score":         score,
+    }
+
+
+def compute_pairing_scores(
+    info_matrix: np.ndarray,
+    mut_idx: int,
+    orfs_at_index: list[dict],
+) -> list[dict]:
+    """
+    For a mutation index with >2 ORFs, compute scores for all valid
+    ref/evo pairings within the same direction.
+    Returns list of pairing dicts sorted by score descending.
+    """
+    ref_orfs = [o for o in orfs_at_index if is_ref_row(o["row"])]
+    evo_orfs = [o for o in orfs_at_index if not is_ref_row(o["row"])]
+
+    pairings = []
+    for r in ref_orfs:
+        for e in evo_orfs:
+            # must be same direction
+            if is_fwd_row(r["row"]) != is_fwd_row(e["row"]):
+                continue
+            s = score_orf_pairing(
+                info_matrix,
+                r["row"], r["orf"], r["start"], r["end"],
+                e["row"], e["orf"], e["start"], e["end"],
+            )
+            pairings.append({
+                "mut_idx":    mut_idx,
+                "ref_row":    r["row"],
+                "ref_frame":  r["orf"],
+                "ref_start":  r["start"],
+                "ref_end":    r["end"],
+                "evo_row":    e["row"],
+                "evo_frame":  e["orf"],
+                "evo_start":  e["start"],
+                "evo_end":    e["end"],
+                **s,
+            })
+
+    pairings.sort(key=lambda x: x["score"], reverse=True)
+    return pairings
+
+
+def build_seq_diffs(info_matrix: np.ndarray) -> list:
+    """Build and filter seq_diffs records (forward + revcomp)."""
+    from collections import defaultdict
+
+    def _build_records(ref_nuc_row, evo_nuc_row, trk_rows):
+        mutation_sites = np.where(
+            info_matrix[ref_nuc_row, :].astype(object) !=
+            info_matrix[evo_nuc_row, :].astype(object)
+        )[0]
+        records = []
+        for idx in mutation_sites:
+            for row in trk_rows:
+                end = min(int(idx) + 21, info_matrix.shape[1])
+                window = info_matrix[row, max(0, int(idx)-1):end]
+                records.append((idx, row, window))
+        return records
+
+    records_f = _build_records(1,  3,  [8, 9])
+    records_r = _build_records(10, 12, [11, 13])
+    combined  = records_f + records_r
+
+    paired = defaultdict(list)
+    for idx, row, window in combined:
+        paired[int(idx)].append((idx, row, window))
+
+    sorted_indices = sorted(paired.keys())
+
+    def split_consecutive(idxs):
+        if not idxs:
+            return []
+        runs, current = [], [idxs[0]]
+        for i in range(1, len(idxs)):
+            if idxs[i] - idxs[i-1] == 1:
+                current.append(idxs[i])
+            else:
+                runs.append(current)
+                current = [idxs[i]]
+        runs.append(current)
+        return runs
+
+    def pair_w1_sig(pair):
+        sig = {}
+        for idx, row, window in pair:
+            sig[row] = int(window[1]) if len(window) > 1 else 0
+        return tuple(sorted(sig.items()))
+
+    # removal filter
+    kept_after_removal = set()
+    for idx in sorted_indices:
+        pair = paired[idx]
+        if len(pair) != 2:
+            kept_after_removal.add(idx)
+            continue
+        (_, _, win_a), (_, _, win_b) = pair
+        if not should_remove_pair(list(win_a), list(win_b)):
+            kept_after_removal.add(idx)
+
+    sorted_kept = sorted(kept_after_removal)
+    if not sorted_kept:
+        return []
+
+    # consecutive mutation filter
+    runs = split_consecutive(sorted_kept)
+    final_kept = set()
+    for run in runs:
+        if len(run) == 1:
+            final_kept.add(run[0])
+            continue
+        sub_run_start = 0
+        current_sig = pair_w1_sig(paired[run[0]])
+        for i in range(1, len(run)):
+            sig = pair_w1_sig(paired[run[i]])
+            if sig != current_sig:
+                final_kept.add(run[sub_run_start])
+                final_kept.add(run[i - 1])
+                sub_run_start = i
+                current_sig = sig
+        final_kept.add(run[sub_run_start])
+        final_kept.add(run[-1])
+
+    result = []
+    for idx in sorted(final_kept):
+        result.extend(paired[idx])
+    return result
+
+
+def build_new_result_matrix(
+    seq_diffs: list,
+    info_matrix: np.ndarray,
+) -> tuple[np.ndarray, dict]:
+    """
+    Build new_result_matrix with columns [mut_idx, row, orf, start, end].
+    Also returns pairing_scores dict keyed by mut_idx for ambiguous sites.
+    """
+    seq_len = info_matrix.shape[1]
+    rows = []
+
+    # group by mut_idx to detect ambiguous sites
+    from collections import defaultdict
+    by_idx = defaultdict(list)
+
+    for idx, trk_row, window in seq_diffs:
+        mut_idx = int(idx)
+        tracker = info_matrix[trk_row, :].astype(int)
+        search_idx = mut_idx
+        while search_idx < seq_len and tracker[search_idx] == -1:
+            search_idx += 1
+        bounds = _extract_affected_orfs(tracker, search_idx, seq_len)
+        if not bounds:
+            rows.append([mut_idx, trk_row, -1, -1, -1])
+        else:
+            for frame, start, end in bounds:
+                rows.append([mut_idx, trk_row, frame, start, end])
+                by_idx[mut_idx].append({
+                    "row":   trk_row,
+                    "orf":   frame,
+                    "start": start,
+                    "end":   end,
+                })
+
+    # compute pairing scores for ambiguous indices
+    pairing_scores = {}
+    for mut_idx, orfs in by_idx.items():
+        ref_orfs = [o for o in orfs if is_ref_row(o["row"])]
+        evo_orfs = [o for o in orfs if not is_ref_row(o["row"])]
+        # ambiguous = more than one valid pairing exists
+        valid_pairs = [
+            (r, e) for r in ref_orfs for e in evo_orfs
+            if is_fwd_row(r["row"]) == is_fwd_row(e["row"])
+        ]
+        if len(valid_pairs) > 1:
+            pairing_scores[mut_idx] = compute_pairing_scores(
+                info_matrix, mut_idx, orfs
+            )
+
+    mat = np.array(rows, dtype=object) if rows else np.empty((0, 5), dtype=object)
+    return mat, pairing_scores

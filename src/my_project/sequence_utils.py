@@ -289,22 +289,13 @@ def process_orf_array(info_matrix, orf_array, primary_row, secondary_row, orf_co
             try:
                 boundaries_primary = find_boundaries_for_row(info_matrix, n, primary_row)
                 boundaries_secondary = find_boundaries_for_row(info_matrix, n, secondary_row)
-            except ValueError as err:
-                # Skip this index if a boundary cannot be computed.
-                print(f"Skipping index {n} for ORF code {orf_code}: {err}")
+            except ValueError:
                 continue
 
-            if boundaries_primary != boundaries_secondary:
-                print(
-                    f"Warning for ORF code {orf_code} at mutation index {n}: boundaries differ between rows {primary_row} and {secondary_row}. Using row {primary_row} boundaries.")
             boundaries = boundaries_primary
 
-            if boundaries in unique_boundaries:
-                print(f"For ORF code {orf_code} at mutation index {n}: mutation already accounted for")
-            else:
+            if boundaries not in unique_boundaries:
                 unique_boundaries.add(boundaries)
                 output.append([orf_code, boundaries[0], boundaries[1]])
-                print(
-                    f"For ORF code {orf_code} at mutation index {n}: boundaries: Left = {boundaries[0]}, Right = {boundaries[1]}")
 
         return output

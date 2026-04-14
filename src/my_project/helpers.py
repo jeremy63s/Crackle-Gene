@@ -68,7 +68,7 @@ def _picker(label: str):
     reading from either an upload or a paste.
     """
     st.subheader(label)
-#    t_upload, t_paste = st.tabs(["Upload FASTA", "Paste FASTA or raw sequence"])
+    t_upload, t_paste = st.tabs(["Upload FASTA", "Paste FASTA or raw sequence"])
 
     chosen_header = None
     chosen_seq = ""
@@ -170,6 +170,3 @@ for p in problems:
 #        st.session_state["start_header"] = start_h or "starting_subsequence"
 #        st.session_state["start_subseq"] = start_seq
 #        st.success("Saved to session state.")
-
-def _presence(name, seq):
-    return f"✅ {name}: {len(seq):,} bp loaded" if seq else f"⚠️ {name} not provided"

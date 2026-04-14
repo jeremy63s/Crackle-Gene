@@ -1,11 +1,5 @@
-import sys, os
-
-print("Python executable:", sys.executable)
-print("Current working dir:", os.getcwd())
-
-
 import parasail
-from sequence_utils import substitution_matrix
+from my_project.sequence_utils import substitution_matrix
 from tqdm import tqdm            # ← add this!
 from typing import Tuple, List
 # alignment.py

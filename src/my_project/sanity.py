@@ -1,8 +1,4 @@
-import os
-print("MPLBACKEND env:", os.environ.get("MPLBACKEND"))
-
 import matplotlib
-print("matplotlib backend:", matplotlib.get_backend())
 
 import matplotlib.pyplot as plt
 import numpy as np
